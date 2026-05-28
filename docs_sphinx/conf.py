@@ -166,8 +166,21 @@ _TAG_FILE = pathlib.Path(_os.environ.get(
     str(HERE.parent.parent / "build" / "doc" / "doxygen" / "html" / "opencv.tag"),
 ))
 
+# Fallback search for the local Doxygen tagfile across common build-dir
+# layouts (vanilla `build/`, `build_contrib/`, nested `build/build_contrib/
+# build_contrib/`). Empty default would silently break `_LOCAL_*_URL`
+# population and the api/core_basic linkifiers.
 if not _TAG_FILE.is_file():
-    _TAG_FILE = HERE.parent.parent / "build" / "doc" / "opencv.tag"
+    for _cand in (
+        HERE.parent.parent / "build" / "doc" / "opencv.tag",
+        HERE.parent.parent / "build_contrib" / "doc" / "doxygen" / "html" / "opencv.tag",
+        HERE.parent.parent / "build_contrib" / "doc" / "opencv.tag",
+        HERE.parent.parent / "build" / "build_contrib" / "build_contrib"
+            / "doc" / "doxygen" / "html" / "opencv.tag",
+    ):
+        if _cand.is_file():
+            _TAG_FILE = _cand
+            break
 
 # anchor -> doxygen URL filename (from opencv.tag if available).
 _TAG_FILENAMES: dict[str, str] = {}
@@ -201,6 +214,209 @@ if _TAG_FILE.is_file():
 
 def _doxygen_url(page: str) -> str:
     return DOXYGEN_BASE_URL + _TAG_FILENAMES.get(page, page)
+
+
+# -- Live (docs.opencv.org) tagfile for API stub URL construction ----------
+# The local Doxygen build runs with CREATE_SUBDIRS=NO (Breathe XML can't
+# handle subdirs), so its tagfile filenames are flat like
+# `group__core__basic.html` — which 404 on docs.opencv.org, where pages are
+# served under hash-based subdirectories (e.g. `dc/d84/group__core__basic.html`).
+# The live tagfile published at https://docs.opencv.org/5.x/opencv.tag has the
+# subdir prefixes baked in. Fetch it once:
+#     curl https://docs.opencv.org/5.x/opencv.tag \
+#       -o <build>/doc/doxygen/opencv-live.tag
+# and the API stub link rewriter (steps 8a/8b in _translate) will pick it up.
+# Falls back silently to the flat URL form when not present.
+_LIVE_TAG_FILE = pathlib.Path(_os.environ.get(
+    "OPENCV_DOXYGEN_LIVE_TAGFILE",
+    str(HERE.parent.parent / "build" / "doc" / "doxygen" / "opencv-live.tag"),
+))
+if not _LIVE_TAG_FILE.is_file():
+    for _alt in (
+        HERE.parent.parent / "build" / "build_contrib" / "build_contrib"
+            / "doc" / "doxygen" / "opencv-live.tag",
+        HERE.parent.parent / "build_contrib" / "doc" / "doxygen" / "opencv-live.tag",
+    ):
+        if _alt.is_file():
+            _LIVE_TAG_FILE = _alt
+            break
+
+_LIVE_GROUP_URL: dict[str, str] = {}   # 'group__core__basic' -> live URL
+_LIVE_CLASS_URL: dict[str, str] = {}   # 'Matx' -> live URL
+_LIVE_TYPEDEF_URL: dict[str, str] = {} # 'uchar' -> live URL (group anchor)
+if _LIVE_TAG_FILE.is_file():
+    try:
+        import xml.etree.ElementTree as _ET
+        for _c in _ET.parse(str(_LIVE_TAG_FILE)).getroot().iter("compound"):
+            _kind = _c.get("kind")
+            _n = _c.findtext("name") or ""
+            _f = _c.findtext("filename") or ""
+            if not (_n and _f):
+                continue
+            _fn = _f if _f.endswith(".html") else _f + ".html"
+            if _kind == "group":
+                # Source-markdown anchors use the Doxygen FILENAME style for
+                # the group identifier (every `_` in the name is doubled —
+                # e.g. tagfile name 'core_basic' becomes filename
+                # 'group__core__basic.html'). Key by the filename's basename
+                # so the anchor pattern `group__<name>_1<hash>` looks up
+                # cleanly.
+                _basename = pathlib.PurePosixPath(_fn).name[:-5]  # strip .html
+                _LIVE_GROUP_URL[_basename] = DOXYGEN_BASE_URL + _fn
+            elif _kind == "class":
+                _short = _n.split("::")[-1]
+                _LIVE_CLASS_URL.setdefault(_short, DOXYGEN_BASE_URL + _fn)
+            # Collect typedef members from any compound (group, namespace,
+            # file). Maps `uchar` -> live anchor URL, used by the api/
+            # core_basic Type-column linkification to make tokens like
+            # `uchar` inside `Vec< uchar, 2 >` clickable just like on the
+            # original Doxygen page.
+            for _mem in _c.findall("member"):
+                if _mem.get("kind") != "typedef":
+                    continue
+                _mn = (_mem.findtext("name") or "").strip()
+                _maf = (_mem.findtext("anchorfile") or "").strip()
+                _man = (_mem.findtext("anchor") or "").strip()
+                if _mn and _maf and _man:
+                    _LIVE_TYPEDEF_URL.setdefault(
+                        _mn, f"{DOXYGEN_BASE_URL}{_maf}#{_man}")
+    except Exception:
+        pass
+
+
+# -- Local-link variants of the maps above ----------------------------------
+# Used by the api/core_basic token-linkifier (step 8g) so clickables inside
+# `<…>` brackets point at LOCAL Sphinx api pages rather than docs.opencv.org.
+# Values are URLs relative to the api/ directory (sibling pages).
+#
+# Source: prefer the LOCAL Doxygen tagfile (`_TAG_FILE`) — always written
+# by the Doxygen build, so these maps are populated whenever Doxygen has
+# run, without needing the separate `opencv-live.tag` download. Fall back
+# to the live tagfile if the local one isn't found.
+_LOCAL_SRC_TAG = _TAG_FILE if _TAG_FILE.is_file() else _LIVE_TAG_FILE
+_LOCAL_CLASS_URL: dict[str, str] = {
+    # `_Tp` is the template parameter placeholder Doxygen sees on most
+    # OpenCV templates. We register the conventional filename here so
+    # the token-linkifier (step 8g) emits a clickable link wherever
+    # `_Tp` appears in code spans on the basic-structures page; if the
+    # stub page doesn't exist locally, the link 404s — generate the
+    # page or remove this entry.
+    "_Tp": "class_Tp.html",
+}
+_LOCAL_TYPEDEF_URL: dict[str, str] = {} # 'uchar' -> 'core_hal_interface.html#_CPPv45uchar'
+if _LOCAL_SRC_TAG.is_file():
+    try:
+        import xml.etree.ElementTree as _ET
+        for _c in _ET.parse(str(_LOCAL_SRC_TAG)).getroot().iter("compound"):
+            if _c.get("kind") == "class":
+                _n = _c.findtext("name") or ""
+                _f = _c.findtext("filename") or ""
+                if _n and _f:
+                    _short = _n.split("::")[-1]
+                    _fn = _f if _f.endswith(".html") else _f + ".html"
+                    _LOCAL_CLASS_URL.setdefault(_short,
+                                                pathlib.PurePosixPath(_fn).name)
+            for _mem in _c.findall("member"):
+                # Accept `typedef` from any compound; accept `variable`
+                # ONLY from namespace compounds. The local Doxygen
+                # tagfile classifies typedef-like references (e.g.
+                # `typedef const _InputArray& InputArray;`) as `variable`
+                # because the underlying type is a reference — those
+                # always live in a namespace compound. Class/struct
+                # `variable` members (single-letter names like `m`, `a`,
+                # `b`, `cn` used in OpenCV class APIs) would otherwise
+                # poison `_LOCAL_TYPEDEF_URL` and cause parameter names
+                # in function signatures to be linkified to random
+                # class members.
+                _mk = _mem.get("kind")
+                if _mk == "typedef":
+                    pass
+                elif _mk == "enumeration":
+                    pass   # enum types like cv::DataLayout — linkable
+                elif _mk == "variable" and _c.get("kind") == "namespace":
+                    pass
+                else:
+                    continue
+                _mn = (_mem.findtext("name") or "").strip()
+                _maf = (_mem.findtext("anchorfile") or "").strip()
+                if not (_mn and _maf):
+                    continue
+                if _mn in _LOCAL_TYPEDEF_URL:
+                    continue   # first-occurrence wins
+                _bn = pathlib.PurePosixPath(_maf).name
+                if _bn.startswith("group__"):
+                    # group__core__hal__interface.html -> core_hal_interface.html
+                    # Strip `group__` prefix; collapse `__` (Doxygen mangling
+                    # of `_` and `::`) back to single `_`. The local Sphinx
+                    # api-stub page name follows this bare form.
+                    _local_page = (_bn[len("group__"):]
+                                   .replace(".html", "")
+                                   .replace("__", "_")
+                                   + ".html")
+                elif _bn.startswith("namespacecv"):
+                    # namespace-page tagfile entries (e.g. InputArray) need
+                    # mapping to the api/core_basic.html page where the
+                    # typedef is actually rendered by Breathe. We can't
+                    # derive this from the namespace filename alone; the
+                    # api stub generator places typedefs in their group's
+                    # page. For namespace-anchored typedefs we fall back
+                    # to `core_basic.html` (the only one currently using
+                    # this page-level rewrite is api/core_basic).
+                    _local_page = "core_basic.html"
+                else:
+                    # class/struct pages keep their basename.
+                    _local_page = _bn
+                # Heuristic: HAL interface typedefs are global C types
+                # (uchar, int64, etc.); everything else is in cv:: namespace.
+                # Sphinx cpp-domain v4 anchor format mirrors this split.
+                if "hal_interface" in _local_page:
+                    _anchor = f"_CPPv4{len(_mn)}{_mn}"
+                else:
+                    _anchor = f"_CPPv4N2cv{len(_mn)}{_mn}E"
+                _LOCAL_TYPEDEF_URL[_mn] = f"{_local_page}#{_anchor}"
+    except Exception:
+        pass
+
+
+# -- Class template-parameter display map -----------------------------------
+# Maps a class short name (e.g. 'Mat_', 'Vec', 'Matx') to its template
+# parameter list as Doxygen would render it (e.g. '< _Tp >', '< _Tp, cn >').
+# Read from the LOCAL Doxygen XML (which contains `<templateparamlist>` per
+# class). Empty `declname` on a `typename`/`class` param defaults to `_Tp`
+# (OpenCV-wide convention — every untemplated `template<typename>` class
+# names its param `_Tp` in the source). Used only by the api/core_basic
+# Classes-table rewrite — see _translate step 8d.
+_CLASS_TEMPLATE_DISPLAY: dict[str, str] = {}
+if _API_XML_DIR.is_dir():
+    try:
+        import xml.etree.ElementTree as _ET
+        for _xml in _API_XML_DIR.glob("classcv_1_1*.xml"):
+            try:
+                _cd = _ET.parse(_xml).getroot().find("compounddef")
+            except _ET.ParseError:
+                continue
+            if _cd is None:
+                continue
+            _tpl = _cd.find("templateparamlist")
+            if _tpl is None:
+                continue
+            _names = []
+            for _p in _tpl.findall("param"):
+                _decl = (_p.findtext("declname")
+                         or _p.findtext("defname") or "").strip()
+                _type = (_p.findtext("type") or "").strip()
+                if _decl:
+                    _names.append(_decl)
+                elif _type in ("typename", "class"):
+                    _names.append("_Tp")
+                elif _type:
+                    _names.append(_type)
+            if _names:
+                _name = (_cd.findtext("compoundname") or "").split("::")[-1]
+                _CLASS_TEMPLATE_DISPLAY[_name] = f"< {', '.join(_names)} >"
+    except Exception:
+        pass
+
 
 # -- HTML / PyData theme ----------------------------------------------------
 try:
@@ -448,6 +664,68 @@ def _build_api_hierarchy(refid: str, xml_dir: pathlib.Path,
                         "name":        (ev.findtext("name") or "").strip(),
                         "initializer": (ev.findtext("initializer") or "").strip(),
                     })
+            # Template params + static-storage flag — only consumed by
+            # the api/core_basic Functions-table emitter to reproduce the
+            # live Doxygen "template<...> static double" Return-column
+            # layout. `declname` is appended only when the type alone
+            # doesn't already carry the param name (Doxygen omits it for
+            # `typename`/`class` placeholders like `_Tp`).
+            _tpl_node = md.find("templateparamlist")
+            template_params: list[str] = []
+            if _tpl_node is not None:
+                for _p in _tpl_node.findall("param"):
+                    _t = _itertext(_p.find("type"))
+                    _dn = (_p.findtext("declname") or "").strip()
+                    template_params.append(f"{_t} {_dn}".strip() if _dn else _t)
+            # Source-file location → for the `#include <…>` line that
+            # the core_basic Function Documentation blocks display.
+            _loc = md.find("location")
+            _include_file = (_loc.get("file") if _loc is not None else "") or ""
+            # Detailed description paragraphs (skip the structured
+            # simplesect/parameterlist children — those are extracted
+            # separately into return_doc/param_docs so we can render
+            # them as labeled sections in the core_basic detail block).
+            _detailed_paras: list[str] = []
+            _det_node = md.find("detaileddescription")
+            if _det_node is not None:
+                for _p in _det_node.findall("para"):
+                    # Strip the param-list / return-doc sub-elements
+                    # before extracting text; otherwise their content
+                    # would inline into the paragraph.
+                    _p_copy = _ET.fromstring(_ET.tostring(_p))
+                    for _sub in list(_p_copy):
+                        if _sub.tag in ("simplesect", "parameterlist"):
+                            _p_copy.remove(_sub)
+                    _txt = _itertext(_p_copy).strip()
+                    if _txt:
+                        _detailed_paras.append(_txt)
+            # Per-parameter documentation (Doxygen's @param) — list of
+            # (declname, description) tuples. Multiple parameter names
+            # can share one parameterlist item (`@param a,b foo`); we
+            # split them out so the rendered list has one bullet per
+            # name.
+            _param_docs: list[tuple[str, str]] = []
+            if _det_node is not None:
+                for _pl in _det_node.iter("parameterlist"):
+                    if _pl.get("kind") not in ("param", None):
+                        continue
+                    for _pi in _pl.findall("parameteritem"):
+                        _names_node = _pi.find("parameternamelist")
+                        _desc_node = _pi.find("parameterdescription")
+                        _desc_txt = _itertext(_desc_node).strip() if _desc_node is not None else ""
+                        if _names_node is None:
+                            continue
+                        for _pn in _names_node.findall("parametername"):
+                            _nm = (_pn.text or "").strip()
+                            if _nm:
+                                _param_docs.append((_nm, _desc_txt))
+            # Return description (`@return …`).
+            _return_doc = ""
+            if _det_node is not None:
+                for _ss in _det_node.iter("simplesect"):
+                    if _ss.get("kind") == "return":
+                        _return_doc = _itertext(_ss).strip()
+                        break
             sections.setdefault(section_title, []).append({
                 "id":          md.get("id", ""),
                 "kind":        kind,
@@ -459,6 +737,13 @@ def _build_api_hierarchy(refid: str, xml_dir: pathlib.Path,
                 "brief":       _itertext(md.find("briefdescription")),
                 "enum_values": enum_values,
                 "strong":      is_strong,
+                "template_params": template_params,
+                "static":      md.get("static", "no") == "yes",
+                "inline":      md.get("inline", "no") == "yes",
+                "include_file": _include_file,
+                "detailed_paras": _detailed_paras,
+                "param_docs":  _param_docs,
+                "return_doc":  _return_doc,
             })
     # Recurse into subgroups.
     children = []
@@ -668,12 +953,34 @@ def _write_api_stub(node: dict, out_dir: pathlib.Path,
         lines.append("")
         if section_title == "Functions":
             lines += ["| Return | Name | Description |", "|---|---|---|"]
+            # Rich Return cell on api/core_basic only: prepend the
+            # `template<…>` clause + `static`/`inline` storage spec so
+            # the layout matches the live Doxygen group page. Other
+            # group pages keep the simple bare-type Return cell — this
+            # change is intentionally scoped to "Basic structures".
+            _rich_return = (name == "core_basic")
             for m in items:
-                ret = _md_escape_cell(m["type"]) or "&nbsp;"
+                ret_type = _md_escape_cell(m["type"]) or "&nbsp;"
                 label = f"{m['name']}{_md_escape_cell(m['args'])}"
                 sig_link = _member_anchor_link(m, label)
+                if _rich_return:
+                    # Strip the Doxygen-visible CV_EXPORTS* macro from
+                    # the return type — the live docs hide it. Scoped
+                    # to the rich-Return path so we don't perturb the
+                    # bare cells on other group pages.
+                    ret_type = re.sub(r"^CV_EXPORTS(?:_[A-Z]+)?\s+", "",
+                                      ret_type)
+                    storage = "static " if m.get("static") else ""
+                    if m.get("template_params"):
+                        tparams = ", ".join(m["template_params"])
+                        ret = (f"`template<{tparams}>`<br>"
+                               f"`{storage}{ret_type}`")
+                    else:
+                        ret = f"`{storage}{ret_type}`"
+                else:
+                    ret = f"`{ret_type}`"
                 lines.append(
-                    f"| `{ret}` | {sig_link} | {_md_escape_cell(m['brief'])} |")
+                    f"| {ret} | {sig_link} | {_md_escape_cell(m['brief'])} |")
         elif section_title in ("Typedefs", "Variables"):
             lines += ["| Type | Name | Description |", "|---|---|---|"]
             for m in items:
@@ -761,6 +1068,29 @@ def _write_api_stub(node: dict, out_dir: pathlib.Path,
             continue
         lines.append(f"## {_MEMBER_DETAIL_SECTION[section_title]}")
         lines.append("")
+        # core_basic Function Documentation rendering: breathe's
+        # `{doxygenfunction}` directive fails to parse every templated
+        # OpenCV signature on this page (37+ "Cannot find function"
+        # warnings clobber the section). Bypass breathe entirely and
+        # hand-roll the per-function detail block from the Doxygen
+        # metadata we already extracted into the dict — heading,
+        # template clause, signature, #include, brief/detailed text,
+        # @param list, @return text. Inner tokens (_Tp, Matx, …) inside
+        # the signature/template codespans get linkified by step 8g
+        # downstream. Scoped to `name == "core_basic"` and
+        # function-kind only; other group pages and other member kinds
+        # keep using the breathe directive.
+        _core_basic_funcs = (name == "core_basic"
+                             and kind_key == "function")
+        _seen_func_anchors: set[str] = set()
+        _overload_idx: dict[str, int] = {}
+        _overload_count: dict[str, int] = {}
+        if _core_basic_funcs:
+            for entry in rendered:
+                if entry[0] == "breathe":
+                    _spec = entry[1]
+                    _short = _spec.split("(")[0].split("::")[-1]
+                    _overload_count[_short] = _overload_count.get(_short, 0) + 1
         for entry in rendered:
             if entry[0] == "synopsis":
                 _, brief, code_lines = entry
@@ -771,6 +1101,92 @@ def _write_api_stub(node: dict, out_dir: pathlib.Path,
                 lines.extend(code_lines)
                 lines.append("```")
                 lines.append("")
+            elif _core_basic_funcs and entry[0] == "breathe":
+                _, spec, _ = entry
+                short = spec.split("(")[0].split("::")[-1]
+                # Find the matching item dict (need full metadata).
+                _m = next((mm for mm in items
+                           if mm["name"] == short
+                           and (mm["qualified"] or mm["name"])
+                                + _function_signature(mm) == spec), None)
+                if _m is None:
+                    # Fallback to breathe if we somehow lost track.
+                    lines += [f"```{{doxygenfunction}} {spec}",
+                              ":project: opencv", "```", ""]
+                    continue
+                # Slug mirrors _func_slug in the translator (step 8i)
+                # so the table-row links resolve to this heading.
+                def _slug(nm: str) -> str:
+                    _PUNCT = {"=": "eq", "!": "ne", "<": "lt", ">": "gt",
+                              "+": "plus", "-": "minus", "*": "mul",
+                              "/": "div", "&": "amp", "|": "or",
+                              "%": "mod", "^": "xor", "~": "tilde",
+                              "[": "lbr", "]": "rbr"}
+                    parts = []
+                    for ch in nm.lower():
+                        if ch.isalnum() or ch == "_":
+                            parts.append(ch)
+                        elif ch in _PUNCT:
+                            parts.append("-" + _PUNCT[ch])
+                        else:
+                            parts.append("-")
+                    s = re.sub(r"-+", "-", "".join(parts)).strip("-")
+                    return f"cv-{s}" if s else "cv"
+                slug = _slug(short)
+                total = _overload_count.get(short, 1)
+                idx = _overload_idx.get(short, 0) + 1
+                _overload_idx[short] = idx
+                # Heading: explicit anchor on the first occurrence only
+                # (browsers navigate to the first id="…" anyway). Show
+                # `[i/n]` for overloaded names, matching the live page.
+                _suffix = f" [{idx}/{total}]" if total > 1 else ""
+                if slug not in _seen_func_anchors:
+                    _seen_func_anchors.add(slug)
+                    lines.append(f"### {short}(){_suffix} {{#{slug}}}")
+                else:
+                    lines.append(f"### {short}(){_suffix}")
+                lines.append("")
+                # Template clause.
+                if _m.get("template_params"):
+                    _tps = ", ".join(_m["template_params"])
+                    lines.append(f"`template<{_tps}>`")
+                    lines.append("")
+                # Signature: storage + return + qualified-name + args.
+                _ret = re.sub(r"^CV_EXPORTS(?:_[A-Z]+)?\s+", "",
+                              _m["type"] or "")
+                _storage = ""
+                if _m.get("static"):
+                    _storage += "static "
+                if _m.get("inline"):
+                    _storage += "inline "
+                _qname = _m["qualified"] or _m["name"]
+                lines.append(f"`{_storage}{_ret} {_qname}{_m['args']}`")
+                lines.append("")
+                # #include line (the live page shows this for every
+                # function as a single inline code line).
+                if _m.get("include_file"):
+                    lines.append(f"`#include <{_m['include_file']}>`")
+                    lines.append("")
+                # Brief + detailed paragraphs.
+                if _m.get("brief"):
+                    lines.append(_m["brief"])
+                    lines.append("")
+                for _para in _m.get("detailed_paras", []) or []:
+                    lines.append(_para)
+                    lines.append("")
+                # Parameter table (only if any @param docs exist).
+                _pdocs = _m.get("param_docs") or []
+                if _pdocs:
+                    lines.append("**Parameters**")
+                    lines.append("")
+                    for _pn, _pd in _pdocs:
+                        lines.append(f"- `{_pn}` — {_pd}" if _pd
+                                     else f"- `{_pn}`")
+                    lines.append("")
+                # Return doc.
+                if _m.get("return_doc"):
+                    lines.append(f"**Returns** — {_m['return_doc']}")
+                    lines.append("")
             else:
                 _, spec, dname = entry
                 lines += [
@@ -1211,9 +1627,16 @@ def _patch_namespace_xml_for_breathe(xml_dir: pathlib.Path,
     import xml.etree.ElementTree as _ET
     import os as _osmod, shutil as _shutil
     src_index = xml_dir / "index.xml"
-    dst_index = out_dir / "index.xml"
-    if (src_index.is_file() and dst_index.is_file()
-            and dst_index.stat().st_mtime >= src_index.stat().st_mtime):
+    # Use a dedicated stamp file (not dst_index) for the freshness check.
+    # dst_index is symlinked to src_index, so stat() on it follows the
+    # symlink and always returns src's mtime — making the previous
+    # `dst_index.mtime >= src_index.mtime` guard ALWAYS true after the
+    # first mirror, freezing the patched dir even when Doxygen regenerated
+    # the source with new files. The stamp is a real file whose mtime
+    # records when the LAST mirror+patch finished.
+    stamp = out_dir / ".mirror_complete"
+    if (src_index.is_file() and stamp.is_file()
+            and stamp.stat().st_mtime >= src_index.stat().st_mtime):
         return
     out_dir.mkdir(parents=True, exist_ok=True)
 
@@ -1308,6 +1731,12 @@ def _patch_namespace_xml_for_breathe(xml_dir: pathlib.Path,
             if out_file.is_symlink() or out_file.is_file():
                 out_file.unlink()
             tree.write(out_file, encoding="utf-8", xml_declaration=True)
+
+    # 4) Record completion with a stamp file. Subsequent invocations
+    #    compare this stamp's mtime against `src_index.xml` — if Doxygen
+    #    has run since (added/removed/changed XMLs), the stamp is older
+    #    and a full re-mirror is triggered.
+    stamp.touch()
 
 
 def _collect_all_nodes(node: dict) -> list[str]:
@@ -2193,6 +2622,354 @@ def _translate(text: str, docname: str | None = None) -> str:
         r"@cite\s+([\w-]+)",
         lambda m: f"[[{m.group(1)}]](https://docs.opencv.org/5.x/d0/de3/citelist.html#CITEREF_{m.group(1)})",
         text)
+
+    # 8a / 8b. API stub link rewriting — narrowly scoped to the
+    # "Basic structures" page (api/core_basic) so other api/ pages are
+    # untouched.
+    #
+    # 8a. Name-column typedef anchors: the stub emits
+    #         [Vec2b](#group__core__basic_1ga595…)
+    #     where the anchor is a Doxygen group-page in-page reference
+    #     that has no matching element on the Sphinx-built page.
+    #     Rewrite to the Sphinx cpp-domain v4 anchor of the typedef on
+    #     this same page — the right-sidebar "On this page" TOC links
+    #     to exactly this anchor, so the table entry and the sidebar
+    #     entry now jump to the same Typedef Documentation section in
+    #     the local build. Only simple identifiers (typedef names) are
+    #     rewritten; function-signature entries are left alone (their
+    #     in-page anchors include mangled parameter types that we can't
+    #     reconstruct from the markdown without parsing the Doxygen
+    #     XML).
+    #
+    # 8b. Type-column class names: stub cells like `Matx< double, 1, 2 >`
+    #     are a single code span with nothing clickable. Rewrite to
+    #     inline HTML where the class name is a link to the LOCAL
+    #     Sphinx api class page (e.g. classcv_1_1Matx.html — a sibling
+    #     file in the same api/ directory). The bare filename is read
+    #     out of the live tagfile (only as a class-name → filename
+    #     map; no docs.opencv.org URL ends up in the output).
+    if docname == "api/core_basic":
+        # 8f. Move Vec specialization rows out of the Typedefs table into
+        #     their own H2 section "Shorter aliases for the most popular
+        #     specializations of Vec<T,n>", placed between "## Functions"
+        #     and "## Typedef Documentation" to match the live Doxygen
+        #     page's ordering. Doxygen reorders user-defined sectiondefs
+        #     after the standard typedef/enum/function sections, but our
+        #     stub generator lumps everything into the main Typedefs
+        #     table; this pass restores the separation.
+        #
+        # Implementation: extract every consecutive `| `Vec<…` | … |`
+        # row from the typedef table (they're all together at the top of
+        # the table because of how the stub generator orders members),
+        # then re-emit them as a new H2 + table just before the
+        # `## Typedef Documentation` heading. Runs BEFORE the other
+        # api/core_basic rewrites so the moved rows still flow through
+        # the typedef-anchor / template-linkification / token-linkifier
+        # passes below.
+        _vec_rows_re = re.compile(
+            r"(?:^\| `Vec<[^`]*` \| [^\n]*\n)+", re.MULTILINE)
+        _vm = _vec_rows_re.search(text)
+        if _vm:
+            _vec_rows = _vm.group(0)
+            text = text[:_vm.start()] + text[_vm.end():]
+            _shorter = (
+                "## Shorter aliases for the most popular specializations of "
+                "Vec<T,n>\n\n"
+                "| Type | Name | Description |\n"
+                "|---|---|---|\n"
+                + _vec_rows + "\n")
+            text = text.replace(
+                "## Typedef Documentation",
+                _shorter + "## Typedef Documentation",
+                1)
+
+        # 8c. Replace `{doxygentypedef} cv::Ptr` with a hand-rolled
+        #     cpp:type directive. Breathe's doxygentypedef cannot render
+        #     C++11 template aliases (`using cv::Ptr = std::shared_ptr<_Tp>`
+        #     in the Doxygen XML) — it silently emits nothing, no warning,
+        #     so the Ptr entry was missing from the Typedef Documentation
+        #     section even though every other typedef rendered. Sphinx's
+        #     native cpp:type directive does support alias templates;
+        #     reach it via an eval-rst escape. Anchor `_CPPv4N2cv3PtrE`
+        #     matches what step 8a generates for the Name-column link.
+        text = re.sub(
+            r"```\{doxygentypedef\} cv::Ptr\s*\n:project: opencv\s*\n```",
+            "```{eval-rst}\n"
+            ".. cpp:namespace:: cv\n"
+            ".. cpp:type:: template<typename _Tp> Ptr = std::shared_ptr<_Tp>\n"
+            "```",
+            text)
+
+        # 8d. Namespaces section — original Doxygen renders this as a
+        #     two-column borderless table ("namespace" label on the left,
+        #     class link on the right), not a heading-plus-bullet-list.
+        #     The stub emits `## Namespaces\n\n- @subpage api_ns_<x>`
+        #     which step 9 then folds into a visible toctree. Replace
+        #     with a two-column table + hidden toctree (so the page's
+        #     sidebar nav still picks up the namespace child).
+        def _build_namespaces_table(m: re.Match) -> str:
+            rows = []
+            toc = []
+            for sub in re.finditer(r"- @subpage api_ns_(?P<a>[A-Za-z0-9_]+)",
+                                   m.group("body")):
+                anchor = sub.group("a")
+                # Doxygen mangles `::` -> `__` in filenames; reverse it
+                # to recover the display name (cv__traits -> cv::traits).
+                display = anchor.replace("__", "::")
+                href = f"namespace_{anchor}.html"
+                docref = f"namespace_{anchor}"
+                rows.append(f"| namespace | [{display}]({href}) |")
+                toc.append(docref)
+            table = "\n".join(
+                ["## Namespaces", "", "| | |", "|---|---|", *rows, ""])
+            if toc:
+                table += "\n```{toctree}\n:hidden:\n:maxdepth: 1\n\n"
+                table += "\n".join(toc) + "\n```\n"
+            return table
+        text = re.sub(
+            r"## Namespaces\n\n(?P<body>(?:- @subpage api_ns_[A-Za-z0-9_]+\n)+)",
+            _build_namespaces_table, text)
+
+        # 8e. Classes table — two changes per row:
+        #     (i)  append the template-parameter list (`< _Tp >` etc.)
+        #          to the class name so e.g. `class cv::Mat_` becomes
+        #          `class cv::Mat_< _Tp >`, matching Doxygen.
+        #     (ii) append a "More..." link to the description cell,
+        #          pointing to the class's own api stub page.
+        def _rewrite_class_row(m: re.Match) -> str:
+            kind = m.group("kind")
+            name = m.group("name")       # 'cv::Mat_'
+            page = m.group("page")       # 'classcv_1_1Mat__'
+            desc = m.group("desc").strip()
+            short = name.split("::")[-1]
+            tparams = _CLASS_TEMPLATE_DISPLAY.get(short, "")
+            label = f"{kind} {name}{tparams}"
+            more = f"[More...]({page}.md)"
+            desc_out = f"{desc} {more}" if desc else more
+            return f"| [`{label}`]({page}.md) | {desc_out} |"
+        text = re.sub(
+            r"\| \[`(?P<kind>class|struct) (?P<name>cv::[A-Za-z0-9_:]+)`\]"
+            r"\((?P<page>(?:class|struct)cv_1_1[A-Za-z0-9_]+)\.md\)"
+            r" \| (?P<desc>[^\n|]*?) \|",
+            _rewrite_class_row, text)
+
+        text = re.sub(
+            r"\[`(?P<name>[A-Za-z_][A-Za-z0-9_]*)`\]"
+            r"\(#group__[a-z0-9_]+?_1[a-z0-9]+\)",
+            lambda m: (f"[`{m.group('name')}`]"
+                       f"(#_CPPv4N2cv{len(m.group('name'))}"
+                       f"{m.group('name')}E)"),
+            text)
+
+        # 8i. Functions-table rows: the original Name column wraps the
+        #     entire signature ("funcname(const Matx< _Tp, m > &a)") in
+        #     ONE link to a broken `#group__…` anchor. Split that into:
+        #       (a) Strip leading `CV_EXPORTS` macro from the Return
+        #           cell (the live Doxygen page doesn't show it).
+        #       (b) Emit the function name as a markdown link to an
+        #           in-page anchor `#cv-<funcname>`. We can't use
+        #           `{cpp:func}` here: the doxygenfunction directives
+        #           further down the page fail to parse on templated
+        #           OpenCV signatures (37+ "Cannot find function"
+        #           warnings), so no C++ domain entry is registered for
+        #           Sphinx to resolve. Instead, step 8j injects a raw
+        #           `<a id="cv-funcname"></a>` anchor before each
+        #           `{doxygenfunction}` block, which is always rendered
+        #           regardless of whether the directive itself succeeds.
+        #       (c) Emit the parameter list as a separate code span;
+        #           step 8g then linkifies recognized class/typedef
+        #           tokens inside it (Matx, Vec, _InputArray, uchar, …).
+        def _func_slug(name: str) -> str:
+            # Mirror what step 8j writes into the HTML id attribute. We
+            # can't just lowercase + collapse non-alphanum: operator
+            # overloads (operator+, operator-, operator==, …) would all
+            # reduce to "operator-" and collide on the same anchor. Map
+            # punctuation to short alpha tokens so each overload gets a
+            # distinct slug.
+            _PUNCT = {"=": "eq", "!": "ne", "<": "lt", ">": "gt",
+                      "+": "plus", "-": "minus", "*": "mul", "/": "div",
+                      "&": "amp", "|": "or", "%": "mod", "^": "xor",
+                      "~": "tilde", "[": "lbr", "]": "rbr"}
+            parts = []
+            for ch in name.lower():
+                if ch.isalnum() or ch == "_":
+                    parts.append(ch)
+                elif ch in _PUNCT:
+                    parts.append("-" + _PUNCT[ch])
+                else:
+                    parts.append("-")
+            s = re.sub(r"-+", "-", "".join(parts)).strip("-")
+            return f"cv-{s}" if s else "cv"
+        def _rewrite_function_row(m: re.Match) -> str:
+            # Return cell may span multiple codespans separated by
+            # `<br>` (rich format: `template<…>`<br>`static double`) or
+            # be a single bare codespan (`double`). Either way, pass it
+            # through unchanged — CV_EXPORTS stripping happens in the
+            # stub generator now.
+            ret = m.group("ret").strip()
+            name = m.group("name")
+            params = m.group("params")
+            desc = m.group("desc")
+            slug = _func_slug(name)
+            return (f"| {ret} | [`cv::{name}`](#{slug}) "
+                    f"`({params})` | {desc} |")
+        text = re.sub(
+            r"\| (?P<ret>[^|\n]*?) \| "
+            r"\[`(?P<name>[^(`\n]+?)\((?P<params>[^`\n]*)\)`\]"
+            r"\(#group__[a-z0-9_]+?_1[a-z0-9]+\) \| "
+            r"(?P<desc>[^\n|]*) \|",
+            _rewrite_function_row, text)
+
+        # 8j. Function Documentation anchors: inject a raw HTML anchor
+        #     immediately before each `{doxygenfunction}` directive so
+        #     the table-row links from step 8i resolve in-page even when
+        #     the directive itself fails to render (the templated OpenCV
+        #     signatures defeat breathe's parser). The anchor sits
+        #     above the (admonition-emitting) directive, so users
+        #     clicking from the table land at the right vertical
+        #     position.
+        # Dedupe anchors across overload sets: emit `<a id="cv-norm">`
+        # only before the FIRST `cv::norm(…)` directive. HTML5 forbids
+        # duplicate ids (browsers tolerate it but tools/AT may not), and
+        # browser navigation only honors the first occurrence anyway.
+        _seen_anchors: set[str] = set()
+        def _inject_func_anchor(m: re.Match) -> str:
+            qname = m.group("qname").strip()  # "cv::log" or "cv::operator!="
+            short = qname.rsplit("::", 1)[-1]
+            slug = _func_slug(short)
+            if slug in _seen_anchors:
+                return m.group(0)
+            _seen_anchors.add(slug)
+            return f'<a id="{slug}"></a>\n\n{m.group(0)}'
+        # `qname` accepts operator punctuation (`!=`, `==`, `<<`, …) by
+        # eating everything up to the first `(` — the param list is on
+        # the same line per the stub generator's output format.
+        text = re.sub(
+            r"^```\{doxygenfunction\} (?P<qname>[^\n(]+)\([^\n]*\n"
+            r":project: opencv\n"
+            r"```",
+            _inject_func_anchor, text, flags=re.MULTILINE)
+
+        if _LIVE_CLASS_URL:
+            def _linkify_class_codespan(m: re.Match) -> str:
+                cls = m.group("cls")
+                rest = m.group("rest")
+                full = _LIVE_CLASS_URL.get(cls)
+                if not full:
+                    return m.group(0)
+                # Use the bare filename — same directory as core_basic.html.
+                href = pathlib.PurePosixPath(full).name
+                rest_esc = (rest.replace("&", "&amp;")
+                                .replace("<", "&lt;")
+                                .replace(">", "&gt;"))
+                return (f'<code class="docutils literal notranslate">'
+                        f'<a class="reference internal" href="{href}">{cls}</a>'
+                        f'{rest_esc}</code>')
+            text = re.sub(
+                r"`(?P<cls>[A-Z][A-Za-z0-9_]*)(?P<rest><[^`\n]*>)`",
+                _linkify_class_codespan, text)
+
+        # 8g. Linkify class/typedef tokens in code spans that step 8b did
+        #     not transform. Covers two cases the live Doxygen page makes
+        #     clickable but our Sphinx output didn't:
+        #       (a) inner template-parameter types: `uchar` in
+        #           `Vec< uchar, 2 >` should link to its typedef definition
+        #           (a group anchor on docs.opencv.org). Step 8b made
+        #           `Vec` itself clickable but the inner `uchar` stayed
+        #           plain text inside `<code>`.
+        #       (b) non-template Type cells: `_InputArray` in
+        #           `const _InputArray &` was never matched by step 8b
+        #           (no `<>` template form) so the class name stayed
+        #           unlinked.
+        #     Two passes: process inner HTML of step-8b `<code>` blocks
+        #     (skipping their existing `<a>`), then process remaining
+        #     plain markdown code spans containing recognized tokens.
+        if _LOCAL_CLASS_URL or _LOCAL_TYPEDEF_URL:
+            def _token_url(tok: str) -> str | None:
+                # Resolve to LOCAL sibling api page URL. Ignores tokens not
+                # in OpenCV's tagfile (C++ primitives like `int`, `float`),
+                # so they stay plain text — matches the live Doxygen page.
+                return _LOCAL_CLASS_URL.get(tok) or _LOCAL_TYPEDEF_URL.get(tok)
+            _tok_re = re.compile(r"\b_?[A-Za-z][A-Za-z0-9_]*\b")
+            def _linkify_html_segment(seg: str) -> str:
+                """Linkify recognized tokens in a plain-text HTML segment."""
+                def _sub(m: re.Match) -> str:
+                    url = _token_url(m.group(0))
+                    if not url:
+                        return m.group(0)
+                    return (f'<a class="reference internal" '
+                            f'href="{url}">{m.group(0)}</a>')
+                return _tok_re.sub(_sub, seg)
+            def _linkify_inside_code(m: re.Match) -> str:
+                """Walk the inner HTML of an existing <code> block, skipping
+                spans already inside <a>...</a> (which step 8b emitted)."""
+                inner = m.group("inner")
+                out, i = [], 0
+                n = len(inner)
+                while i < n:
+                    if inner.startswith("<a ", i):
+                        j = inner.find("</a>", i)
+                        if j < 0:
+                            out.append(inner[i:]); break
+                        out.append(inner[i:j + 4])
+                        i = j + 4
+                    else:
+                        # Take a chunk up to the next <a — process it.
+                        k = inner.find("<a ", i)
+                        if k < 0:
+                            out.append(_linkify_html_segment(inner[i:]))
+                            break
+                        out.append(_linkify_html_segment(inner[i:k]))
+                        i = k
+                return m.group("open") + "".join(out) + m.group("close")
+            text = re.sub(
+                r'(?P<open><code class="docutils literal notranslate">)'
+                r'(?P<inner>.*?)(?P<close></code>)',
+                _linkify_inside_code, text, flags=re.DOTALL)
+
+            def _linkify_markdown_codespan(m: re.Match) -> str:
+                """Convert a markdown `…` code span to <code>…</code> with
+                embedded <a> tags when its content contains a recognized
+                token; otherwise leave unchanged."""
+                content = m.group("content")
+                hits = [(t.start(), t.end(), t.group(0)) for t in
+                        _tok_re.finditer(content) if _token_url(t.group(0))]
+                if not hits:
+                    return m.group(0)
+                # Build mixed-HTML version preserving non-token text.
+                from html import escape as _esc
+                parts, last = [], 0
+                for s, e, tok in hits:
+                    parts.append(_esc(content[last:s]))
+                    url = _token_url(tok)
+                    parts.append(f'<a class="reference internal" '
+                                 f'href="{url}">{tok}</a>')
+                    last = e
+                parts.append(_esc(content[last:]))
+                return (f'<code class="docutils literal notranslate">'
+                        f'{"".join(parts)}</code>')
+            # Mask out markdown links `[`…`](…)` before running the
+            # codespan regex. A simple `(?<!\[)…(?!\])` lookaround was
+            # not enough: a line like
+            #   | `double` | [`cv::determinant`](#cv-determinant) `(…)`
+            # has FOUR backticks. The lookbehind blocks the 1st pair
+            # opener correctly, but the regex then pairs the 2nd
+            # backtick (closing `cv::determinant`) with the 3rd
+            # (opening `(…)`), capturing `](#cv-determinant) ` as
+            # content and leaving the actual `(…)` param span
+            # untouched. Masking the entire link first removes those
+            # interior backticks from consideration so the param span
+            # can be matched.
+            _masked: list[str] = []
+            def _mask(m: re.Match) -> str:
+                _masked.append(m.group(0))
+                return f"\x00MDLINK{len(_masked)-1}\x00"
+            text = re.sub(r"\[`[^`\n]+`\]\([^)\n]+\)", _mask, text)
+            text = re.sub(
+                r"`(?P<content>[^`\n]+?)`",
+                _linkify_markdown_codespan, text)
+            text = re.sub(r"\x00MDLINK(\d+)\x00",
+                          lambda m: _masked[int(m.group(1))], text)
 
     # 8b. @youtube{ID}  -> responsive embed (raw HTML, passed through by MyST).
     text = re.sub(
