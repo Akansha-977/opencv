@@ -1009,6 +1009,15 @@ html[data-theme="dark"] table.api-typedef-table tbody tr td:nth-child(1) {
     color: #8b949e !important;
 }
 
+/* Linkified tokens inside the Type cell (Complexd, _InputArray, Vec, …)
+ * inherit the cell's muted color by default, so they read as plain text
+ * and lose their clickability cue. Restore the theme's link color on
+ * the anchor itself in light mode; dark mode is left to the cell-level
+ * rule above (where the muted light-gray is already legible). */
+html:not([data-theme="dark"]) table.api-typedef-table tbody tr td:nth-child(1) a {
+    color: var(--pst-color-link, #0969da) !important;
+}
+
 /* Column 2: Alias Name (e.g., Vec2b) — Pushed to the right side.
  * Normal weight (not bold) per user spec; the `<code>` wrapper that the
  * MyST link emits (`[`cv::Vec2b`](…)` → `<a><code>cv::Vec2b</code></a>`)

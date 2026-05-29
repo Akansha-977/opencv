@@ -436,6 +436,11 @@ def _translate(text: str, docname: str | None = None) -> str:
             _shorter = (
                 "## Shorter aliases for the most popular specializations of "
                 "Vec<T,n>\n\n"
+                # Carry the `.api-typedef-table` class so the section
+                # inherits the same table styling (and the light-mode
+                # blue Type-cell anchor rule) as the main Typedefs table
+                # above.
+                "{.api-typedef-table}\n"
                 "| Type | Name | Description |\n"
                 "|---|---|---|\n"
                 + _vec_rows + "\n")
@@ -479,15 +484,17 @@ def _translate(text: str, docname: str | None = None) -> str:
             _rewrite_class_row, text)
 
         # 8a. Name-column typedef anchors: the stub emits a `#group__…` in-page
-        #     anchor with no matching element on the Sphinx page. Rewrite simple
-        #     identifiers to the cpp-domain v4 anchor of the typedef so the
-        #     table entry and the right-sidebar TOC jump to the same place.
+        #     link, but the detail block's MyST `({refid})=` target is rendered
+        #     by Sphinx as a slug-normalized id (`__`/`_` runs collapsed to a
+        #     single `-`). Without rewriting, the literal `#group__…` link
+        #     fragment doesn't match the slugified id, so the click does
+        #     nothing. Normalize the link fragment the same way Sphinx
+        #     normalizes the target id so the two sides agree.
         text = re.sub(
             r"\[`(?P<name>[A-Za-z_][A-Za-z0-9_]*)`\]"
-            r"\(#group__[a-z0-9_]+?_1[a-z0-9]+\)",
+            r"\(#(?P<ref>group__[a-z0-9_]+?_1[a-z0-9]+)\)",
             lambda m: (f"[`{m.group('name')}`]"
-                       f"(#_CPPv4N2cv{len(m.group('name'))}"
-                       f"{m.group('name')}E)"),
+                       f"(#{re.sub(r'_+', '-', m.group('ref'))})"),
             text)
 
         # 8i. Functions-table rows: split the single broken-`#group__…`-anchor

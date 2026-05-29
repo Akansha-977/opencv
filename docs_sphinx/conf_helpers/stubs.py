@@ -259,9 +259,12 @@ def _write_api_stub(node: dict, out_dir: pathlib.Path,
                 lines.append(f"| `{t}` | {name_link} | {_md_escape_cell(m['brief'])} |")
         elif section_title == "Enumerations":
             # Code-style synopsis (Doxygen layout) instead of name/desc table.
-            # Both summary and detail-block representations would duplicate
-            # the same content — we only emit the synopsis here, and skip
-            # enums in the detail-block loop below.
+            # On most group pages we emit the synopsis only — the per-value
+            # initializer list is already self-explanatory. On core_basic we
+            # additionally append a "More..." link after each synopsis,
+            # pointing to that enum's detail block in the "Enumeration Type
+            # Documentation" section emitted by the detail loop below.
+            _enum_more_link = (name == "core_basic")
             for m in items:
                 if m["brief"]:
                     lines.append(_md_escape_cell(m["brief"]))
@@ -269,6 +272,10 @@ def _write_api_stub(node: dict, out_dir: pathlib.Path,
                 lines.append("```cpp")
                 lines.extend(_enum_synopsis_lines(m))
                 lines.append("```")
+                if _enum_more_link:
+                    _qual = m["qualified"] or m["name"]
+                    _eid = _sphinx_cpp_v4_id(_qual)
+                    lines.append(f"[More...](#{_eid})")
                 lines.append("")
             continue   # already appended trailing blank
         else:  # Macros
@@ -290,7 +297,13 @@ def _write_api_stub(node: dict, out_dir: pathlib.Path,
     seen_define_names: set[str] = set()
     for kind_key, section_title in _MEMBERDEF_SECTIONS:
         items = node["sections"].get(section_title, [])
-        if not items or kind_key == "enum":
+        if not items:
+            continue
+        # Enum detail blocks are emitted only on core_basic — every other
+        # group page is content with the summary-only synopsis. The
+        # detail block provides the `_CPPv4…` anchor target for the
+        # "More..." link added by the summary above.
+        if kind_key == "enum" and name != "core_basic":
             continue
         # api/core_basic functions use a hand-rolled rich block (see
         # `_render_core_basic_func`) instead of `_render_member_detail`. Count
@@ -321,6 +334,18 @@ def _write_api_stub(node: dict, out_dir: pathlib.Path,
                 _slug_seen.add(slug)
                 blocks.append(_render_core_basic_func(
                     m, _ov_idx[short], _ov_total.get(short, 1), emit_anchor))
+                continue
+            if kind_key == "enum":
+                # core_basic-only path (gated by the early `continue` above).
+                # Breathe's `{doxygenenum}` handles cv:: enums reliably and
+                # emits the `_CPPv4N2cv<len><name>E` anchor that the
+                # synopsis "More..." link targets.
+                blocks.append([
+                    f"```{{doxygenenum}} {m['qualified'] or m['name']}",
+                    ":project: opencv",
+                    "```",
+                    "",
+                ])
                 continue
             if kind_key == "define":
                 # Macros aren't namespaced; dedupe arity-overloaded ones.
