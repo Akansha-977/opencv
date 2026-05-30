@@ -311,7 +311,6 @@ if _LOCAL_SRC_TAG.is_file():
                 elif _bn.startswith("namespacecv"):
                     _local_page = "core_basic.html"
                 else:
-<<<<<<< HEAD
                     _local_page = _bn   # class/struct pages keep their basename
                 # Anchor on the target page is the MyST heading-slug of the
                 # typedef name (the detail block emits `### <Name>`, which
@@ -322,14 +321,6 @@ if _LOCAL_SRC_TAG.is_file():
                 # which is why the inner-token links inside `< >` weren't
                 # navigating.
                 _anchor = _mn.lower()
-=======
-                    _local_page = _bn
-                # HAL typedefs are global C; else cv::-scoped (cpp-domain v4 anchor)
-                if "hal_interface" in _local_page:
-                    _anchor = f"_CPPv4{len(_mn)}{_mn}"
-                else:
-                    _anchor = f"_CPPv4N2cv{len(_mn)}{_mn}E"
->>>>>>> abhishek/doc_optimizations_v2_squashed
                 _LOCAL_TYPEDEF_URL[_mn] = f"{_local_page}#{_anchor}"
     except Exception:
         pass

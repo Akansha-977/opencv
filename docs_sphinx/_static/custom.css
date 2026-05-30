@@ -912,29 +912,21 @@ html[data-theme="dark"] table.api-typedef-table tbody tr td:nth-child(1) {
     color: #8b949e !important;
 }
 
-<<<<<<< HEAD
 /* Linkified tokens inside the Type cell (Complexd, _InputArray, Vec, …)
  * inherit the cell's muted color by default, so they read as plain text
  * and lose their clickability cue. Restore the theme's link color on
  * the anchor itself in light mode; dark mode is left to the cell-level
  * rule above (where the muted light-gray is already legible). */
-=======
-/* Light-mode: blue Type-cell links. */
->>>>>>> abhishek/doc_optimizations_v2_squashed
 html:not([data-theme="dark"]) table.api-typedef-table tbody tr td:nth-child(1) a {
     color: var(--pst-color-link, #0969da) !important;
 }
 
-<<<<<<< HEAD
 /* Column 2: Alias Name (e.g., Vec2b) — Pushed to the right side.
  * Normal weight (not bold) per user spec; the `<code>` wrapper that the
  * MyST link emits (`[`cv::Vec2b`](…)` → `<a><code>cv::Vec2b</code></a>`)
  * carries the theme's default code background + border, which would draw
  * an unwanted pill around the title — strip both, and force the code to
  * inherit the link color so the cv:: text stays a clean blue / white. */
-=======
-/* Column 2: alias name — strip the code pill and inherit the link colour. */
->>>>>>> abhishek/doc_optimizations_v2_squashed
 table.api-typedef-table tbody tr td:nth-child(2) {
     color: var(--pst-color-link, #0969da) !important;
     font-weight: 400 !important;

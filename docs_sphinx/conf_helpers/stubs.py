@@ -402,21 +402,16 @@ def _write_api_stub(node: dict, out_dir: pathlib.Path,
                 name_link = _member_anchor_link(m, m["name"])
                 lines.append(f"| `{t}` | {name_link} | {_md_escape_cell(m['brief'])} |")
         elif section_title == "Enumerations":
-<<<<<<< HEAD
             # Code-style synopsis (Doxygen layout) instead of name/desc table.
             # On most group pages we emit the synopsis only — the per-value
             # initializer list is already self-explanatory. On core_basic we
             # additionally append a "More..." link after each synopsis,
             # pointing to that enum's detail block in the "Enumeration Type
             # Documentation" section emitted by the detail loop below.
-=======
-            # core_basic also links to detail.
->>>>>>> abhishek/doc_optimizations_v2_squashed
             _enum_more_link = (name == "core_basic")
             for m in items:
                 _more = ""
                 if _enum_more_link:
-<<<<<<< HEAD
                     _qual = m["qualified"] or m["name"]
                     _eid = _sphinx_cpp_v4_id(_qual)
                     _more = f"[More...](#{_eid})"
@@ -425,17 +420,6 @@ def _write_api_stub(node: dict, out_dir: pathlib.Path,
                 # description (matching the live Doxygen group page
                 # layout). When there's no brief, the link stands alone
                 # below the synopsis.
-=======
-                    _eid = _sphinx_cpp_v4_id(m["qualified"] or m["name"])
-                    _more = f" [View details](#{_eid})"
-                if m["brief"]:
-                    # Link inline at end of brief.
-                    lines.append(_md_escape_cell(m["brief"]) + _more)
-                    lines.append("")
-                elif _more:
-                    lines.append(_more.strip())
-                    lines.append("")
->>>>>>> abhishek/doc_optimizations_v2_squashed
                 lines.append("```cpp")
                 lines.extend(_enum_synopsis_lines(m))
                 lines.append("```")
@@ -463,15 +447,12 @@ def _write_api_stub(node: dict, out_dir: pathlib.Path,
     for kind_key, section_title in _MEMBERDEF_SECTIONS:
         items = node["sections"].get(section_title, [])
         if not items:
-<<<<<<< HEAD
             continue
         # Enum detail blocks are emitted only on core_basic — every other
         # group page is content with the summary-only synopsis. The
         # detail block provides the `_CPPv4…` anchor target for the
         # "More..." link added by the summary above.
         if kind_key == "enum" and name != "core_basic":
-=======
->>>>>>> abhishek/doc_optimizations_v2_squashed
             continue
         # Enum detail blocks: core_basic only.
         if kind_key == "enum" and name != "core_basic":
@@ -502,14 +483,10 @@ def _write_api_stub(node: dict, out_dir: pathlib.Path,
                     m, _ov_idx[short], _ov_total.get(short, 1), emit_anchor))
                 continue
             if kind_key == "enum":
-<<<<<<< HEAD
                 # core_basic-only path (gated by the early `continue` above).
                 # Breathe's `{doxygenenum}` handles cv:: enums reliably and
                 # emits the `_CPPv4N2cv<len><name>E` anchor that the
                 # synopsis "More..." link targets.
-=======
-                # core_basic only; doxygenenum emits anchor.
->>>>>>> abhishek/doc_optimizations_v2_squashed
                 blocks.append([
                     f"```{{doxygenenum}} {m['qualified'] or m['name']}",
                     ":project: opencv",

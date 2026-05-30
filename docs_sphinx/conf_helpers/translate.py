@@ -338,14 +338,10 @@ def _translate(text: str, docname: str | None = None) -> str:
             _shorter = (
                 "## Shorter aliases for the most popular specializations of "
                 "Vec<T,n>\n\n"
-<<<<<<< HEAD
                 # Carry the `.api-typedef-table` class so the section
                 # inherits the same table styling (and the light-mode
                 # blue Type-cell anchor rule) as the main Typedefs table
                 # above.
-=======
-                # Match the main Typedefs table styling.
->>>>>>> abhishek/doc_optimizations_v2_squashed
                 "{.api-typedef-table}\n"
                 "| Type | Name | Description |\n"
                 "|---|---|---|\n"
@@ -373,7 +369,6 @@ def _translate(text: str, docname: str | None = None) -> str:
             short = name.split("::")[-1]
             tparams = _CLASS_TEMPLATE_DISPLAY.get(short, "")
             label = f"{kind} {name}{tparams}"
-<<<<<<< HEAD
             # "More..." only when the target class page actually emits a
             # "Detailed Description" section (`_write_class_stub`
             # populates `_CLASSES_WITH_DETAIL` for those). Otherwise the
@@ -385,11 +380,6 @@ def _translate(text: str, docname: str | None = None) -> str:
                 desc_out = f"{desc} {more}" if desc else more
             else:
                 desc_out = desc
-=======
-            more = (f'<a class="opencv-class-more" '
-                    f'href="{page}.html#detailed-description">More...</a>')
-            desc_out = f"{desc} {more}" if desc else more
->>>>>>> abhishek/doc_optimizations_v2_squashed
             return f"| [`{label}`]({page}.md) | {desc_out} |"
         text = re.sub(
             r"\| \[`(?P<kind>class|struct) (?P<name>cv::[A-Za-z0-9_:]+)`\]"
@@ -397,7 +387,6 @@ def _translate(text: str, docname: str | None = None) -> str:
             r" \| (?P<desc>[^\n|]*?) \|",
             _rewrite_class_row, text)
 
-<<<<<<< HEAD
         # 8a. Name-column typedef anchors: the stub emits a `#group__…` in-page
         #     link, but the detail block's MyST `({refid})=` target is rendered
         #     by Sphinx as a slug-normalized id (`__`/`_` runs collapsed to a
@@ -405,9 +394,6 @@ def _translate(text: str, docname: str | None = None) -> str:
         #     fragment doesn't match the slugified id, so the click does
         #     nothing. Normalize the link fragment the same way Sphinx
         #     normalizes the target id so the two sides agree.
-=======
-        # 8a. Name-column typedef anchors -> slugified detail-block id.
->>>>>>> abhishek/doc_optimizations_v2_squashed
         text = re.sub(
             r"\[`(?P<name>[A-Za-z_][A-Za-z0-9_]*)`\]"
             r"\(#(?P<ref>group__[a-z0-9_]+?_1[a-z0-9]+)\)",
