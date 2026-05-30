@@ -125,6 +125,8 @@ def _parse_member_sections(cd) -> dict[str, list[dict]]:
     sections: dict[str, list[dict]] = {}
     _seen_member_ids: set[str] = set()
     for sd in cd.findall("sectiondef"):
+        # Doxygen `@name` member-group title; carried onto each member.
+        sd_header = (sd.findtext("header") or "").strip()
         for md in sd.findall("memberdef"):
             kind = md.get("kind", "")
             section_title = dict(_MEMBERDEF_SECTIONS).get(kind)
@@ -170,6 +172,7 @@ def _parse_member_sections(cd) -> dict[str, list[dict]]:
                 "const":       md.get("const") == "yes",
                 "template":    _member_template(md),
                 "include_file": _include_file,
+                "section_header": sd_header,
                 "detailed":    _dtl,
                 "params":      _params,
                 "returns":     _returns,

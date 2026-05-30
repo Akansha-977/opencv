@@ -6,40 +6,49 @@ HERE = pathlib.Path(__file__).resolve().parent.parent
 DOC_ROOT = (HERE.parent / "doc").resolve()
 OPENCV_ROOT = HERE.parent.resolve()
 
-# SCOPE — env OPENCV_DOC_MODULES
+# SCOPE — tutorial module folders; env override or auto-discover per tree
 import os as _os
-DOC_MODULES = [
-    m.strip()
-    for m in (_os.environ.get("OPENCV_DOC_MODULES") or "photo,objdetect,dnn,gpu,others,core,calib3d,features,introduction,imgproc,3d,app,ios").split(",")
-    if m.strip()
-]
 
-# env OPENCV_JS_DOC_MODULES
-JS_DOC_MODULES = [
-    m.strip()
-    for m in (_os.environ.get("OPENCV_JS_DOC_MODULES") or "js_setup,js_gui,js_core,js_imgproc,js_video,js_dnn").split(",")
-    if m.strip()
-]
+def _discover_doc_modules(subdir: str, toc_glob: str) -> list[str]:
+    """Folder names under DOC_ROOT/<subdir> that carry a TOC page (sorted)."""
+    root = DOC_ROOT / subdir
+    if not root.is_dir():
+        return []
+    return sorted(p.name for p in root.iterdir()
+                  if p.is_dir() and any(p.glob(toc_glob)))
 
-# env OPENCV_PY_DOC_MODULES
-PY_DOC_MODULES = [
-    m.strip()
-    for m in (_os.environ.get("OPENCV_PY_DOC_MODULES") or "py_setup,py_core,py_imgproc,py_video,py_photo,py_objdetect,py_gui,py_features,py_calib3d,py_ml,py_bindings").split(",")
-    if m.strip()
-]
+def _module_list(env_var: str, subdir: str, toc_glob: str) -> list[str]:
+    """Env-var override (comma list) when set & non-empty, else auto-discover."""
+    val = _os.environ.get(env_var)
+    if val:
+        return [m.strip() for m in val.split(",") if m.strip()]
+    return _discover_doc_modules(subdir, toc_glob)
 
-# SCOPE — env OPENCV_CONTRIB_MODULES; missing source dirs skipped
-CONTRIB_MODULES = [
-    m.strip()
-    for m in (_os.environ.get("OPENCV_CONTRIB_MODULES") or "ml,bgsegm,bioinspired,cannops,ccalib,cnn_3dobj,cvv,dnn_objdetect,dnn_superres,gapi,hdf,julia,line_descriptor,phase_unwrapping,structured_light,viz,tracking,sfm").split(",")
-    if m.strip()
-]
+DOC_MODULES = _module_list(
+    "OPENCV_DOC_MODULES", "tutorials", "table_of_content_*.markdown")
+JS_DOC_MODULES = _module_list(
+    "OPENCV_JS_DOC_MODULES", "js_tutorials", "js_table_of_contents_*.markdown")
+PY_DOC_MODULES = _module_list(
+    "OPENCV_PY_DOC_MODULES", "py_tutorials", "py_table_of_contents_*.markdown")
+
+# SCOPE — env OPENCV_CONTRIB_MODULES; empty/unset auto-discovers
 CONTRIB_ROOT = pathlib.Path(
     _os.environ.get("OPENCV_CONTRIB_ROOT")
     or str(HERE.parent.parent / "opencv_contrib" / "modules")
 ).resolve()
 
-# SCOPE — env OPENCV_API_MODULES
+def _discover_contrib_modules() -> list[str]:
+    """Contrib module folders carrying a `tutorials/` subtree (CMake's gate)."""
+    if not CONTRIB_ROOT.is_dir():
+        return []
+    return sorted(p.name for p in CONTRIB_ROOT.iterdir()
+                  if p.is_dir() and (p / "tutorials").is_dir())
+
+_contrib_env = _os.environ.get("OPENCV_CONTRIB_MODULES")
+CONTRIB_MODULES = ([m.strip() for m in _contrib_env.split(",") if m.strip()]
+                   if _contrib_env else _discover_contrib_modules())
+
+# SCOPE — env OPENCV_API_MODULES (comma/semicolon); empty disables API pages
 def _discover_api_modules() -> list[str]:
     """Every main module whose umbrella header declares `@defgroup`."""
     found = []
@@ -54,10 +63,11 @@ def _discover_api_modules() -> list[str]:
     return sorted(found)
 
 
+# Default = discovered full set; override (comma/semicolon), empty disables
 API_MODULES = [
     m.strip()
-    for m in (_os.environ.get("OPENCV_API_MODULES") or
-              ",".join(_discover_api_modules())).split(",")
+    for m in re.split(r"[,;]", _os.environ.get("OPENCV_API_MODULES")
+                      or ",".join(_discover_api_modules()))
     if m.strip()
 ]
 
@@ -138,6 +148,7 @@ DOXYGEN_BASE_URL = (
 _TAG_CANDIDATES = (
     HERE.parent / "build" / "doc" / "doxygen" / "html" / "opencv.tag",
     HERE.parent.parent / "build" / "doc" / "doxygen" / "html" / "opencv.tag",
+    # extra build-dir layouts (vanilla, contrib, nested CI)
     HERE.parent.parent / "build" / "doc" / "opencv.tag",
     HERE.parent.parent / "build_contrib" / "doc" / "doxygen" / "html" / "opencv.tag",
     HERE.parent.parent / "build_contrib" / "doc" / "opencv.tag",
@@ -290,7 +301,7 @@ if _LOCAL_SRC_TAG.is_file():
                 if _mk == "typedef":
                     pass
                 elif _mk == "enumeration":
-                    pass
+                    pass   # enum types like cv::DataLayout — linkable
                 elif _mk == "variable" and _c.get("kind") == "namespace":
                     pass
                 else:
@@ -756,9 +767,26 @@ _LANG_ALIASES = {
     "guess": "text",
     "gradle": "groovy",
     "run": "bash",
+    # `m` = Objective-C in the iOS tutorials (.m sources); Pygments uses `objc`.
+    "m": "objc",
+    # No Pygments lexer for these fence tags used by ios/app/face tutorials —
+    # render as plain text instead of warning "lexer name is not known".
+    "csv": "text",
+    "plaintext": "text",
 }
 
+# Whether the generated `index.markdown` landing page is the master doc (the
+# site root). When True (the default), the cross-family roots — intro, js/py
+# tutorial roots, faq, citelist, contrib root, api root — are listed in the
+# index page's own toctree, so they must NOT also be injected into the
+# `tutorials/tutorials` page (doing both puts each doc in two toctrees and
+# double-nests them in the sidebar). conf.py reads this to pick `master_doc`;
+# translate.py reads it to skip the `tutorials/tutorials` @subpage injection.
+# Set False to fall back to the legacy "tutorials/tutorials is the root" layout.
+USE_INDEX_LANDING = True
+
 __all__ = [
+    "USE_INDEX_LANDING",
     "HERE", "DOC_ROOT", "OPENCV_ROOT",
     "DOC_MODULES", "JS_DOC_MODULES", "PY_DOC_MODULES",
     "CONTRIB_MODULES", "CONTRIB_ROOT", "SPHINX_INPUT_ROOT", "API_MODULES",

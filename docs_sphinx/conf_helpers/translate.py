@@ -81,7 +81,10 @@ def _translate(text: str, docname: str | None = None) -> str:
         text)
 
     # 0. Master doc: synthesize js/py root @subpage entries.
-    if docname == "tutorials/tutorials":
+    #    Skipped under USE_INDEX_LANDING: those roots live in index's
+    #    own toctree, so injecting here would double-nest them.
+    if docname == "tutorials/tutorials" and not USE_INDEX_LANDING:
+        # Lead sidebar with intro; faq/bibliography stay appended.
         if "intro" in _ANCHOR_TO_DOC:
             text = re.sub(r"^- @subpage", "- @subpage intro\n- @subpage",
                           text, count=1, flags=re.MULTILINE)
@@ -102,6 +105,7 @@ def _translate(text: str, docname: str | None = None) -> str:
                 "@subpage tutorial_py_table_of_contents_video",
                 text,
             )
+        # Object Detection stays @ref (its C++ page is already in main toctree).
 
     # 0d. py_video/py_objdetect stub trees -> :orphan: (real link via 0a).
     if docname and (docname.startswith("py_tutorials/py_video/")
@@ -440,7 +444,7 @@ def _translate(text: str, docname: str | None = None) -> str:
                 full = _LIVE_CLASS_URL.get(cls)
                 if not full:
                     return m.group(0)
-                href = pathlib.PurePosixPath(full).name
+                href = pathlib.PurePosixPath(full).name  # same api/ directory
                 rest_esc = (rest.replace("&", "&amp;")
                                 .replace("<", "&lt;")
                                 .replace(">", "&gt;"))
@@ -929,11 +933,12 @@ def _source_read(app, docname, source):
             or docname.startswith("api/")
             or docname == "faq"
             or docname == "citelist"
-            or docname == "intro"):
+            or docname == "intro"
+            or docname == "index"):
         return
     text = source[0]
     # Master doc: append contrib/api roots without editing tutorials.markdown.
-    if docname == "tutorials/tutorials":
+    if docname == "tutorials/tutorials" and not USE_INDEX_LANDING:
         if CONTRIB_MODULES and "tutorial_contrib_root" in _ANCHOR_TO_DOC:
             text = text.rstrip() + "\n\n- @subpage tutorial_contrib_root\n"
         if API_MODULES and "api_root" in _ANCHOR_TO_DOC:

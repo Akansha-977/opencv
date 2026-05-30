@@ -17,6 +17,7 @@ from conf_helpers.state import (
     DOC_ROOT, CONTRIB_ROOT, SPHINX_INPUT_ROOT,
     DOC_MODULES, JS_DOC_MODULES, PY_DOC_MODULES, CONTRIB_MODULES, API_MODULES,
     DOXYGEN_BASE_URL, _doxygen_url, _PATCHED_XML_DIR, HAVE_BREATHE,
+    USE_INDEX_LANDING,
 )
 import conf_helpers.build      # noqa: F401  bib staging, scans, API stubs, indexes.
 import conf_helpers.patches    # noqa: F401  Sphinx C++ xref + warning patches.
@@ -63,11 +64,15 @@ cpp_id_attributes = [
 ]
 c_id_attributes = list(cpp_id_attributes)
 
-# Root tutorial index; stays master regardless of DOC_MODULES.
-master_doc = "tutorials/tutorials"
+# Master doc. By default the generated `index.markdown` landing page is the
+# site root (USE_INDEX_LANDING); its toctree lists every cross-family root and
+# its body is the OpenCV-modules link list. Setting the flag False falls back
+# to the legacy layout where `tutorials/tutorials` is the root.
+master_doc = "index" if USE_INDEX_LANDING else "tutorials/tutorials"
 
 # Scope: master + enabled main modules + (optionally) enabled contrib modules.
-include_patterns = ["tutorials/tutorials.markdown", "faq.markdown",
+include_patterns = (["index.markdown"] if USE_INDEX_LANDING else []) + [
+                    "tutorials/tutorials.markdown", "faq.markdown",
                     "citelist.markdown", "intro.markdown"] + [
     f"tutorials/{m}/**" for m in DOC_MODULES
 ] + (["js_tutorials/js_tutorials.markdown"] if JS_DOC_MODULES else []) + [
@@ -140,7 +145,10 @@ html_theme_options = {
     "show_prev_next": True,
     "show_nav_level": 2,
     "navigation_depth": 4,
-    "secondary_sidebar_items": ["page-toc"],
+    # Every page shows the in-page "On this page" TOC, except the generated
+    # landing page (index), where an empty list removes the secondary sidebar
+    # entirely so the centered entry list isn't pushed off to the left.
+    "secondary_sidebar_items": {"**": ["page-toc"], "index": []},
     "back_to_top_button": True,
     "show_version_warning_banner": False,
     "icon_links": [{"name": "GitHub",

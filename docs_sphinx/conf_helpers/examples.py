@@ -292,7 +292,6 @@ def _render_examples_block(examples: list[tuple[str, str]]) -> list[str]:
         "",
     ]
 
-
 # Boilerplate-paragraph filter for _extract_sample_brief.
 _SAMPLE_BRIEF_SKIP_RE = re.compile(
     r"^(?:"
@@ -349,6 +348,39 @@ def _extract_sample_brief(text: str) -> str:
     return ""
 
 
+# Doxygen markup inside `@example` description text: `@ref` cross-references
+# and Markdown image embeds. The generated page skips the `_translate`
+# source-read pipeline, so resolve these here via translate's shared indexes.
+_BRIEF_REF_RE = re.compile(r'@ref\s+(?P<anchor>[\w:-]+)(?:\s+"(?P<label>[^"]+)")?')
+_BRIEF_IMG_RE = re.compile(r'!\[(?P<alt>[^\]]*)\]\((?P<src>[^)]+)\)')
+
+
+def _resolve_brief_markup(brief: str) -> str:
+    """Resolve `@ref` links and bare-filename images in a brief to Markdown."""
+    def _ref(m: "re.Match") -> str:
+        anchor = _resolve_redirect(m.group("anchor"))
+        label = m.group("label")
+        target = _ANCHOR_TO_DOC.get(anchor)
+        if target:
+            return f'[{label or _ANCHOR_TO_TITLE.get(anchor) or anchor}](/{target})'
+        if anchor in _TAG_FILENAMES:
+            return f'[{label or _TAG_TITLES.get(anchor, anchor)}]({_doxygen_url(anchor)})'
+        return f'[{label or anchor}](#{anchor})'
+    brief = _BRIEF_REF_RE.sub(_ref, brief)
+
+    def _img(m: "re.Match") -> str:
+        alt, src = m.group("alt"), m.group("src")
+        # Leave already-pathed / absolute / URL images for MyST to handle.
+        if "/" in src or "://" in src:
+            return m.group(0)
+        hit = _IMAGE_INDEX.get(src)
+        if not hit:
+            return m.group(0)
+        # Hard break after image so following prose drops to a new line.
+        return f'![{alt}](/{hit})\\\n'
+    return _BRIEF_IMG_RE.sub(_img, brief).strip()
+
+
 def _generate_example_pages(examples_dir: pathlib.Path) -> None:
     """Write one Sphinx page per sample referenced by an Examples block.
 
@@ -381,7 +413,9 @@ def _generate_example_pages(examples_dir: pathlib.Path) -> None:
             "",
         ]
         if brief:
-            lines.append(f'<p class="opencv-example-brief">{brief}</p>')
+            # MyST paragraph (not raw <p>) so embedded @ref / image renders.
+            lines.append("{.opencv-example-brief}")
+            lines.append(_resolve_brief_markup(brief))
             lines.append("")
         lines.extend([
             f":::{{code-block}} {language}",
