@@ -266,16 +266,27 @@ def _write_api_stub(node: dict, out_dir: pathlib.Path,
             # Documentation" section emitted by the detail loop below.
             _enum_more_link = (name == "core_basic")
             for m in items:
-                if m["brief"]:
-                    lines.append(_md_escape_cell(m["brief"]))
-                    lines.append("")
-                lines.append("```cpp")
-                lines.extend(_enum_synopsis_lines(m))
-                lines.append("```")
+                _more = ""
                 if _enum_more_link:
                     _qual = m["qualified"] or m["name"]
                     _eid = _sphinx_cpp_v4_id(_qual)
-                    lines.append(f"[More...](#{_eid})")
+                    _more = f"[More...](#{_eid})"
+                # Synopsis first, then the brief description line below it
+                # — with "More..." appended inline at the end of that
+                # description (matching the live Doxygen group page
+                # layout). When there's no brief, the link stands alone
+                # below the synopsis.
+                lines.append("```cpp")
+                lines.extend(_enum_synopsis_lines(m))
+                lines.append("```")
+                if m["brief"]:
+                    line = _md_escape_cell(m["brief"])
+                    if _more:
+                        line = f"{line} {_more}"
+                        _more = ""
+                    lines.append(line)
+                if _more:
+                    lines.append(_more)
                 lines.append("")
             continue   # already appended trailing blank
         else:  # Macros
@@ -669,6 +680,11 @@ def _write_class_stub(cls: dict, out_dir: pathlib.Path,
     _directive = "doxygenstruct" if cls["kind"] == "struct" else "doxygenclass"
     examples = _find_examples_for_class(qualified.rsplit("::", 1)[-1])
     if data["detailed"]:
+        # Register this class as one whose stub renders a "Detailed
+        # Description" section so translator step 8e knows to keep the
+        # "More..." link on its Classes-table row (otherwise the link
+        # would land at the top of a page with nothing to "expand").
+        _CLASSES_WITH_DETAIL.add(_class_page_name(cls["refid"]))
         lines += [
             "## Detailed Description",
             "",

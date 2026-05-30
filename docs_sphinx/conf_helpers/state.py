@@ -382,7 +382,7 @@ _LOCAL_CLASS_URL: dict[str, str] = {
     # wherever `_Tp` appears in code spans on the basic-structures page.
     "_Tp": "class_Tp.html",
 }
-_LOCAL_TYPEDEF_URL: dict[str, str] = {}  # 'uchar' -> 'core_hal_interface.html#_CPPv45uchar'
+_LOCAL_TYPEDEF_URL: dict[str, str] = {}  # 'uchar' -> 'core_hal_interface.html#uchar'
 if _LOCAL_SRC_TAG.is_file():
     try:
         import xml.etree.ElementTree as _ET
@@ -434,13 +434,15 @@ if _LOCAL_SRC_TAG.is_file():
                     _local_page = "core_basic.html"
                 else:
                     _local_page = _bn   # class/struct pages keep their basename
-                # HAL interface typedefs are global C types (uchar, int64, …);
-                # everything else is cv::-scoped. cpp-domain v4 anchor mirrors
-                # this split.
-                if "hal_interface" in _local_page:
-                    _anchor = f"_CPPv4{len(_mn)}{_mn}"
-                else:
-                    _anchor = f"_CPPv4N2cv{len(_mn)}{_mn}E"
+                # Anchor on the target page is the MyST heading-slug of the
+                # typedef name (the detail block emits `### <Name>`, which
+                # Sphinx turns into `<section id="<name lowercased>">`).
+                # The previously-emitted `_CPPv4…` mangling pointed at an
+                # id that doesn't exist on the page (no `{doxygentypedef}`
+                # is emitted, so no C++ domain entry registers that id),
+                # which is why the inner-token links inside `< >` weren't
+                # navigating.
+                _anchor = _mn.lower()
                 _LOCAL_TYPEDEF_URL[_mn] = f"{_local_page}#{_anchor}"
     except Exception:
         pass
@@ -453,6 +455,14 @@ if _LOCAL_SRC_TAG.is_file():
 # (OpenCV convention). Used only by the api/core_basic Classes-table rewrite
 # (translate step 8e).
 _CLASS_TEMPLATE_DISPLAY: dict[str, str] = {}
+
+# Set of class-page basenames (e.g. `classcv_1_1Mat__`) whose stub emits a
+# "Detailed Description" section — populated by `_write_class_stub` after it
+# decides whether to emit `## Detailed Description`. The translator step 8e
+# consults this set to suppress the `More...` link on rows whose target page
+# has no detail section to jump to (the link would otherwise dump the user at
+# the top of the class page).
+_CLASSES_WITH_DETAIL: set[str] = set()
 if _API_XML_DIR.is_dir():
     try:
         import xml.etree.ElementTree as _ET
@@ -958,6 +968,7 @@ __all__ = [
     "_TAG_FILE", "_TAG_FILENAMES", "_TAG_TITLES", "_CV_SYMBOL_URL",
     "_LIVE_GROUP_URL", "_LIVE_CLASS_URL", "_LIVE_TYPEDEF_URL",
     "_LOCAL_CLASS_URL", "_LOCAL_TYPEDEF_URL", "_CLASS_TEMPLATE_DISPLAY",
+    "_CLASSES_WITH_DETAIL",
     "_func_slug",
     "_CITE_NUMBER", "_BIB_ENTRIES_SORTED", "_bib_render_all",
     "_REDIRECT_MAP", "_resolve_redirect",

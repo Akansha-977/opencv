@@ -474,8 +474,17 @@ def _translate(text: str, docname: str | None = None) -> str:
             short = name.split("::")[-1]
             tparams = _CLASS_TEMPLATE_DISPLAY.get(short, "")
             label = f"{kind} {name}{tparams}"
-            more = f"[More...]({page}.md)"
-            desc_out = f"{desc} {more}" if desc else more
+            # "More..." only when the target class page actually emits a
+            # "Detailed Description" section (`_write_class_stub`
+            # populates `_CLASSES_WITH_DETAIL` for those). Otherwise the
+            # link would land at the top of a page that has nothing
+            # extra to show — drop it entirely, leaving just the
+            # description cell unchanged.
+            if page in _CLASSES_WITH_DETAIL:
+                more = f"[More...]({page}.md#detailed-description)"
+                desc_out = f"{desc} {more}" if desc else more
+            else:
+                desc_out = desc
             return f"| [`{label}`]({page}.md) | {desc_out} |"
         text = re.sub(
             r"\| \[`(?P<kind>class|struct) (?P<name>cv::[A-Za-z0-9_:]+)`\]"
