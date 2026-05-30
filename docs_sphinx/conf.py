@@ -100,6 +100,30 @@ myst_enable_extensions = [
     "attrs_inline", "attrs_block", "smartquotes",
 ]
 myst_heading_anchors = 4
+
+# OpenCV's custom LaTeX macros (\vecthree, \cameramatrix, …) — ported from
+# doc/mymath.js so MathJax resolves them the same way the Doxygen site does.
+mathjax3_config = {
+    "loader": {"load": ["[tex]/ams"]},
+    "tex": {
+        "packages": {"[+]": ["ams"]},
+        "macros": {
+            "matTT": [r"\[ \left|\begin{array}{ccc} #1 & #2 & #3\\ #4 & #5 & #6\\ #7 & #8 & #9 \end{array}\right| \]", 9],
+            "fork": [r"\left\{ \begin{array}{l l} #1 & \mbox{#2}\\ #3 & \mbox{#4}\\ \end{array} \right.", 4],
+            "forkthree": [r"\left\{ \begin{array}{l l} #1 & \mbox{#2}\\ #3 & \mbox{#4}\\ #5 & \mbox{#6}\\ \end{array} \right.", 6],
+            "forkfour": [r"\left\{ \begin{array}{l l} #1 & \mbox{#2}\\ #3 & \mbox{#4}\\ #5 & \mbox{#6}\\ #7 & \mbox{#8}\\ \end{array} \right.", 8],
+            "vecthree": [r"\begin{bmatrix} #1\\ #2\\ #3 \end{bmatrix}", 3],
+            "vecthreethree": [r"\begin{bmatrix} #1 & #2 & #3\\ #4 & #5 & #6\\ #7 & #8 & #9 \end{bmatrix}", 9],
+            "cameramatrix": [r"#1 = \begin{bmatrix} f_x & 0 & c_x\\ 0 & f_y & c_y\\ 0 & 0 & 1 \end{bmatrix}", 1],
+            "distcoeffs": [r"(k_1, k_2, p_1, p_2[, k_3[, k_4, k_5, k_6 [, s_1, s_2, s_3, s_4[, \tau_x, \tau_y]]]]) \text{ of 4, 5, 8, 12 or 14 elements}"],
+            "distcoeffsfisheye": [r"(k_1, k_2, k_3, k_4)"],
+            "hdotsfor": [r"\dots", 1],
+            "mathbbm": [r"\mathbb{#1}", 1],
+            "bordermatrix": [r"\matrix{#1}", 1],
+        },
+    },
+}
+
 suppress_warnings = [
     "myst.header", "myst.xref_missing", "toc.not_included",
     "misc.highlighting_failure",

@@ -1,7 +1,20 @@
 """Doxygen XML -> Markdown primitives for the API-reference stubs."""
 from __future__ import annotations
+import copy as _copy
 import pathlib, re, os as _os, shutil as _shutil, textwrap as _textwrap
 from .state import *
+
+
+def _wrap_emphasis(inner: str, delim: str) -> str:
+    """Wrap `inner` in a `*`/`**` run, hoisting any leading/trailing whitespace
+    outside the markers. CommonMark needs the delimiters to hug the text
+    (`**x**`, not `** x **`), but Doxygen keeps the spaces inside `<b> … </b>`."""
+    stripped = inner.strip()
+    if not stripped:
+        return inner
+    lead = inner[:len(inner) - len(inner.lstrip())]
+    trail = inner[len(inner.rstrip()):]
+    return f"{lead}{delim}{stripped}{delim}{trail}"
 
 
 def _itertext(el) -> str:
@@ -79,15 +92,22 @@ def _member_template(md) -> str:
 
 
 def _member_detail_parts(md):
-    """Return (detailed_md, params, returns) from a memberdef."""
+    """Return (detailed_md, params, returns) from a memberdef.
+
+    Params and the @return value are pulled out and rendered separately by the
+    page template, so they're stripped from the prose. Everything else — bullet
+    lists, @note/@warning admonitions, code blocks, tables — is rendered with
+    the full block-aware converter (`_doxygen_desc_to_md`), the same one used
+    for class/namespace/group descriptions. Using `_itertext` here instead
+    flattened `<itemizedlist>` into a run-on paragraph and silently dropped
+    note `simplesect`s.
+    """
     de = md.find("detaileddescription")
     if de is None:
         return "", [], ""
-    params, returns, prose = [], "", []
+    params, returns = [], ""
     for para in de.findall("para"):
-        pls = para.findall("parameterlist")
-        sss = para.findall("simplesect")
-        for pl in pls:
+        for pl in para.findall("parameterlist"):
             if pl.get("kind") in ("param", "templateparam"):
                 for it in pl.findall("parameteritem"):
                     nm = ", ".join(
@@ -96,18 +116,20 @@ def _member_detail_parts(md):
                     d = _itertext(it.find("parameterdescription"))
                     if nm:
                         params.append((nm, d))
-        for ss in sss:
+        for ss in para.findall("simplesect"):
             if ss.get("kind") == "return":
                 returns = _itertext(ss)
-        if pls or sss:
-            lead = (para.text or "").strip()
-            if lead:
-                prose.append(lead)
-        else:
-            t = _itertext(para)
-            if t:
-                prose.append(t)
-    return "\n\n".join(prose), params, returns
+    # Prune the param/return chrome (rendered separately) then convert the rest
+    # with full block support so lists and notes survive.
+    pruned = _copy.deepcopy(de)
+    for para in pruned.findall("para"):
+        for child in list(para):
+            if child.tag == "parameterlist":
+                para.remove(child)
+            elif (child.tag == "simplesect"
+                  and child.get("kind") in ("param", "templateparam", "return")):
+                para.remove(child)
+    return _doxygen_desc_to_md(pruned), params, returns
 
 
 # I/O proxy types as a variable type = Doxygen phantom; drop it.
@@ -291,6 +313,13 @@ def _doxygen_desc_to_md(el, h_level: int = 3) -> str:
             url = f"{DOXYGEN_BASE_URL}{refid}.html"
         return f"[`{text}`]({url})"
 
+    def _formula_md(raw: str) -> str:
+        """Doxygen <formula> -> MyST math. Display \\[..\\] -> $$..$$; inline kept."""
+        s = (raw or "").strip()
+        if s.startswith(r"\[") and s.endswith(r"\]"):
+            return f"\n\n$$\n{s[2:-2].strip()}\n$$\n\n"
+        return s
+
     _BLOCK_TAGS = {"orderedlist", "itemizedlist", "programlisting", "simplesect", "table"}
 
     def _emit_block(sub, result: list, level: int) -> None:
@@ -354,9 +383,11 @@ def _doxygen_desc_to_md(el, h_level: int = 3) -> str:
             elif t == "computeroutput":
                 parts.append(f"`{inner}`" if inner else "")
             elif t == "emphasis":
-                parts.append(f"*{inner}*" if inner else "")
+                parts.append(_wrap_emphasis(inner, "*") if inner else "")
             elif t in ("bold", "strong"):
-                parts.append(f"**{inner}**" if inner else "")
+                parts.append(_wrap_emphasis(inner, "**") if inner else "")
+            elif t == "formula":
+                parts.append(_formula_md(inner))
             elif t == "sp":
                 parts.append(" ")
             elif t == "linebreak":
@@ -417,9 +448,11 @@ def _doxygen_desc_to_md(el, h_level: int = 3) -> str:
                         elif st == "computeroutput":
                             pending.append(f"`{inner}`" if inner else "")
                         elif st == "emphasis":
-                            pending.append(f"*{inner}*" if inner else "")
+                            pending.append(_wrap_emphasis(inner, "*") if inner else "")
                         elif st in ("bold", "strong"):
-                            pending.append(f"**{inner}**" if inner else "")
+                            pending.append(_wrap_emphasis(inner, "**") if inner else "")
+                        elif st == "formula":
+                            pending.append(_formula_md(inner))
                         elif st == "sp":
                             pending.append(" ")
                         elif st == "linebreak":

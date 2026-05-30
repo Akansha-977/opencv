@@ -364,7 +364,7 @@ def _translate(text: str, docname: str | None = None) -> str:
             "```",
             text)
 
-        # 8e. Classes table rows: append template params + "More..." link.
+        # 8e. Classes table rows: append template params + "View details" link.
         def _rewrite_class_row(m: re.Match) -> str:
             kind = m.group("kind")
             name = m.group("name")       # 'cv::Mat_'
@@ -378,9 +378,13 @@ def _translate(text: str, docname: str | None = None) -> str:
             # populates `_CLASSES_WITH_DETAIL` for those). Otherwise the
             # link would land at the top of a page that has nothing
             # extra to show — drop it entirely, leaving just the
-            # description cell unchanged.
+            # description cell unchanged. Emitted as raw HTML so the
+            # `opencv-class-more` class survives MyST processing and the
+            # theme rule can style it.
             if page in _CLASSES_WITH_DETAIL:
-                more = f"[More...]({page}.md#detailed-description)"
+                more = (f'<a class="opencv-class-more" '
+                        f'href="{page}.html#detailed-description">'
+                        f'More...</a>')
                 desc_out = f"{desc} {more}" if desc else more
             else:
                 desc_out = desc

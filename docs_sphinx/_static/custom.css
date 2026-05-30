@@ -25,6 +25,11 @@ h3 { font-size: 1.125rem; font-weight: 600; line-height: 1.4; }
 .bd-content ol ol ol { list-style-type: lower-roman; }
 .bd-content ol > li > p:first-child > strong:first-child::after { content: ":"; }
 
+/* In-content toctree (API "Topics" list): bullets + breathing room. */
+.bd-content .toctree-wrapper > ul { list-style: disc; padding-left: 1.5rem; }
+.bd-content .toctree-wrapper li { list-style: disc; margin: 0.4rem 0; }
+.bd-content .toctree-wrapper { margin: 0.5rem 0 1.5rem; }
+
 /* --- Landing page (generated index.markdown — .ocv-landing wrapper) ------
  * The index page has no secondary "On this page" sidebar (emptied in
  * conf.py), so the content column is full-width. Cap the entry list's width
@@ -599,6 +604,15 @@ section[id$="-documentation"] > section > dl,
 section[id$="-documentation"] > section > div[class*="highlight"] {
     margin: 0;
     padding: 0.35rem 1rem;
+}
+/* Bulleted / numbered lists in a card body: the shared row padding above sets
+   padding-left to 1rem, but `list-style-position: outside` draws the marker in
+   that left padding — at 1rem it lands in the gutter and gets clipped at the
+   card edge. Indent so the marker sits ~1rem inside the body and the item text
+   lines up past it (the "tab" space). */
+section[id$="-documentation"] > section > ul,
+section[id$="-documentation"] > section > ol {
+    padding-left: 2.5rem;
 }
 /* Signature line-height a touch looser so the clubbed template/declaration
    pair breathes. */
