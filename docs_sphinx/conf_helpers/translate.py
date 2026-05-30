@@ -333,27 +333,13 @@ def _translate(text: str, docname: str | None = None) -> str:
 
 
     if docname == "api/core_basic":
-        _vec_rows_re = re.compile(
-            r"(?:^\| `Vec<[^`]*` \| [^\n]*\n)+", re.MULTILINE)
-        _vm = _vec_rows_re.search(text)
-        if _vm:
-            _vec_rows = _vm.group(0)
-            text = text[:_vm.start()] + text[_vm.end():]
-            _shorter = (
-                "## Shorter aliases for the most popular specializations of "
-                "Vec<T,n>\n\n"
-                # Carry the `.api-typedef-table` class so the section
-                # inherits the same table styling (and the light-mode
-                # blue Type-cell anchor rule) as the main Typedefs table
-                # above.
-                "{.api-typedef-table}\n"
-                "| Type | Name | Description |\n"
-                "|---|---|---|\n"
-                + _vec_rows + "\n")
-            text = text.replace(
-                "## Typedef Documentation",
-                _shorter + "## Typedef Documentation",
-                1)
+        # NOTE: the previous translator-side "Shorter aliases for the
+        # most popular specializations of Vec<T,n>" extraction lived
+        # here. It's now redundant — `_write_api_stub` (stubs.py) emits
+        # every Doxygen `@name`-grouped section as its own `## <header>`
+        # block natively, including this one. Re-extracting here
+        # produced a duplicate H2 with the same text (Sphinx
+        # disambiguated the id as `…-vec-t-n` and `id1`).
 
         # 8c. `{doxygentypedef} cv::Ptr` -> hand-rolled cpp:type (breathe skips C++11 aliases).
         text = re.sub(
@@ -372,7 +358,11 @@ def _translate(text: str, docname: str | None = None) -> str:
             desc = m.group("desc").strip()
             short = name.split("::")[-1]
             tparams = _CLASS_TEMPLATE_DISPLAY.get(short, "")
-            label = f"{kind} {name}{tparams}"
+            # Keep the `class`/`struct` keyword as a separate, plain
+            # (non-clickable) code chip. The clickable link starts at
+            # `cv::Name` and covers only the qualified type name plus
+            # any template-parameter display.
+            link_label = f"{name}{tparams}"
             # "More..." only when the target class page actually emits a
             # "Detailed Description" section (`_write_class_stub`
             # populates `_CLASSES_WITH_DETAIL` for those). Otherwise the
@@ -388,9 +378,13 @@ def _translate(text: str, docname: str | None = None) -> str:
                 desc_out = f"{desc} {more}" if desc else more
             else:
                 desc_out = desc
-            return f"| [`{label}`]({page}.md) | {desc_out} |"
+            return (f"| `{kind}` [`{link_label}`]({page}.md) "
+                    f"| {desc_out} |")
         text = re.sub(
-            r"\| \[`(?P<kind>class|struct) (?P<name>cv::[A-Za-z0-9_:]+)`\]"
+            # `name` accepts template specializations (`< _Tp, ... >`)
+            # by allowing anything non-backtick, so the split also fires
+            # on rows like `cv::ParamType< _Tp, std::enable_if<...> >`.
+            r"\| \[`(?P<kind>class|struct) (?P<name>cv::[^`]+)`\]"
             r"\((?P<page>(?:class|struct)cv_1_1[A-Za-z0-9_]+)\.md\)"
             r" \| (?P<desc>[^\n|]*?) \|",
             _rewrite_class_row, text)
@@ -464,14 +458,29 @@ def _translate(text: str, docname: str | None = None) -> str:
             def _token_url(tok: str) -> str | None:
                 # Tokens absent from the tagfile stay plain.
                 return _LOCAL_CLASS_URL.get(tok) or _LOCAL_TYPEDEF_URL.get(tok)
-            _tok_re = re.compile(r"\b_?[A-Za-z][A-Za-z0-9_]*\b")
+            # Optional `cv::` prefix is part of the match so the emitted
+            # anchor spans `cv::Name` (not just `Name`). URL lookup
+            # strips the prefix before consulting the tagfile maps.
+            _tok_re = re.compile(r"(?:cv::)?_?[A-Za-z][A-Za-z0-9_]*")
+            def _bare(tok: str) -> str:
+                return tok[4:] if tok.startswith("cv::") else tok
+            def _anchor_text(tok: str) -> str:
+                # HTML-entity-encode the `::` separator so the later
+                # `_linkify_cv_symbols` pass (which runs after step 8g
+                # has already converted markdown to HTML, so its
+                # `_apply_outside_code` no longer recognizes our token
+                # text as "inside code") doesn't match `cv::Name` and
+                # wrap a second external `docs.opencv.org` anchor
+                # inside ours — that would nest and steal the click.
+                # Browsers decode the entities back to `:` on render.
+                return tok.replace("::", "&#58;&#58;")
             def _linkify_html_segment(seg: str) -> str:
                 def _sub(m: re.Match) -> str:
-                    url = _token_url(m.group(0))
+                    url = _token_url(_bare(m.group(0)))
                     if not url:
                         return m.group(0)
                     return (f'<a class="reference internal" '
-                            f'href="{url}">{m.group(0)}</a>')
+                            f'href="{url}">{_anchor_text(m.group(0))}</a>')
                 return _tok_re.sub(_sub, seg)
             def _linkify_inside_code(m: re.Match) -> str:
                 inner = m.group("inner")
@@ -495,8 +504,12 @@ def _translate(text: str, docname: str | None = None) -> str:
 
             def _linkify_markdown_codespan(m: re.Match) -> str:
                 content = m.group("content")
+                # Same prefix-aware match as in `_linkify_html_segment`:
+                # `cv::Name` becomes one hit so the wrapping anchor
+                # covers both pieces.
                 hits = [(t.start(), t.end(), t.group(0)) for t in
-                        _tok_re.finditer(content) if _token_url(t.group(0))]
+                        _tok_re.finditer(content)
+                        if _token_url(_bare(t.group(0)))]
                 if not hits:
                     return m.group(0)
                 from html import escape as _esc
@@ -504,7 +517,8 @@ def _translate(text: str, docname: str | None = None) -> str:
                 for s, e, tok in hits:
                     parts.append(_esc(content[last:s]))
                     parts.append(f'<a class="reference internal" '
-                                 f'href="{_token_url(tok)}">{tok}</a>')
+                                 f'href="{_token_url(_bare(tok))}">'
+                                 f'{_anchor_text(tok)}</a>')
                     last = e
                 parts.append(_esc(content[last:]))
                 return (f'<code class="docutils literal notranslate">'
@@ -624,6 +638,34 @@ def _translate(text: str, docname: str | None = None) -> str:
         return f'<a href="{href}">{label}</a>'
     text = _apply_outside_code(text, lambda chunk: re.sub(
         r"@cite\s+(?P<key>[\w-]+)", _cite_repl, chunk))
+
+    # 8a. Bare bib-key references -> citation link. Doxygen frequently
+    # fails to resolve `@cite KEY` inside `@addtogroup ... { ... }`
+    # blocks (the key reaches the XML as plain text, not a `<ref>`),
+    # so the rendered stub has bare `Kannala2006`, `Felzenszwalb2006`,
+    # etc. Match every key from the bib (compiled to a single
+    # alternation regex) and emit the same `[N]` link as step 8.
+    # Excludes citelist itself (where the keys are the targets) and
+    # text already inside markdown link/anchor brackets to avoid
+    # re-linkifying step-8 output.
+    if _CITE_NUMBER and docname != "citelist":
+        _CITE_KEY_RE = re.compile(
+            r"(?<![\[\w])(?P<key>"
+            + "|".join(re.escape(k) for k in _CITE_NUMBER)
+            + r")(?![\w\]])"
+        )
+        def _bare_cite_repl(m: re.Match) -> str:
+            key = m.group("key")
+            num = _CITE_NUMBER.get(key)
+            label = f"[{num}]" if num is not None else f"[{key}]"
+            if "citelist" in _ANCHOR_TO_DOC:
+                depth = docname.count("/") if docname else 0
+                href = ("../" * depth) + f"citelist.html#CITEREF_{key}"
+            else:
+                href = f"{DOXYGEN_BASE_URL}citelist.html#CITEREF_{key}"
+            return f'<a href="{href}">{label}</a>'
+        text = _apply_outside_code(
+            text, lambda chunk: _CITE_KEY_RE.sub(_bare_cite_repl, chunk))
 
     # 8b. @youtube{ID} -> responsive raw-HTML embed.
     text = re.sub(
@@ -827,6 +869,12 @@ def _translate(text: str, docname: str | None = None) -> str:
     # 14b. Wrap bare URLs in `<...>` (runs after 14a).
     text = _linkify_bare_urls(text)
 
+    # 14c. Resolve `opencv_source_code/<path>` Doxygen alias -> GitHub link.
+    text = _linkify_opencv_source_code(text)
+
+    # 14d. Resolve Doxygen `#funcName` cross-references in prose -> link.
+    text = _linkify_dox_hash_refs(text)
+
     # 15. Restore @verbatim stash (see step 0v).
     for _vk, _vv in _verbatim_stash.items():
         text = text.replace(_vk, _vv)
@@ -878,12 +926,66 @@ def _linkify_bare_urls(src: str) -> str:
         lambda chunk: _BARE_URL_RE.sub(r"<\g<url>>", chunk))
 
 
+# Doxygen alias `opencv_source_code/<path>` -> GitHub source URL. The
+# Doxygen build resolves the alias via configuration; the Sphinx wrapper
+# has no equivalent macro, so without this pass the alias would render
+# as plain unclickable text (calib.hpp / 3d.hpp note admonitions hit
+# this pattern repeatedly).
+_OPENCV_SOURCE_CODE_RE = re.compile(
+    r"\bopencv_source_code/(?P<path>[\w./\-]+)"
+)
+
+
+def _linkify_opencv_source_code(src: str) -> str:
+    def _repl(m: re.Match) -> str:
+        path = m.group("path")
+        url = f"https://github.com/opencv/opencv/blob/5.x/{path}"
+        return f"[opencv_source_code/{path}]({url})"
+    return _apply_outside_code(
+        src, lambda chunk: _OPENCV_SOURCE_CODE_RE.sub(_repl, chunk))
+
+
+# Doxygen `#funcName` (and `#ClassName`) cross-reference in prose ->
+# a markdown link. Looked up in `_CV_SYMBOL_URL` (populated from the
+# Doxygen tagfile). Bare references like "See also #calibrationMatrixValues"
+# in @note blocks would otherwise render as literal text on Sphinx because
+# Doxygen's `#name` syntax has no MyST equivalent. The lookbehind keeps
+# this from chewing on heading markers (`### Heading`), MyST attribute
+# blocks (`{#anchor}`), and existing markdown link targets (`(#anchor)`).
+_DOX_HASH_REF_RE = re.compile(
+    r"(?<![{(#\w])#(?P<name>[A-Za-z_]\w*)\b"
+)
+
+
+def _linkify_dox_hash_refs(src: str) -> str:
+    if not _CV_SYMBOL_URL:
+        return src
+    def _repl(m: re.Match) -> str:
+        name = m.group("name")
+        url = _CV_SYMBOL_URL.get(name)
+        if not url:
+            return m.group(0)
+        return f"[{name}]({url})"
+    return _apply_outside_code(
+        src, lambda chunk: _DOX_HASH_REF_RE.sub(_repl, chunk))
+
+
 def _linkify_cv_symbols(src: str) -> str:
     if not _CV_SYMBOL_URL:
         return src
+    def _local_url(sym: str) -> str | None:
+        """Prefer a Sphinx-local URL when one exists for `sym`.
+        `_LOCAL_CLASS_URL` and `_LOCAL_TYPEDEF_URL` are populated from
+        the tagfile but rewritten to point at the local api/ tree
+        (e.g. `classcv_1_1Mat.html`, `core_basic.html#vec2b`). If no
+        local entry exists, return None so the caller drops the link —
+        we never bounce readers off-site for symbols whose Sphinx
+        version isn't present in this build.
+        """
+        return _LOCAL_CLASS_URL.get(sym) or _LOCAL_TYPEDEF_URL.get(sym)
     def repl_cv(m: re.Match) -> str:
         sym = m.group("sym")
-        url = _CV_SYMBOL_URL.get(sym)
+        url = _local_url(sym)
         if not url:
             return m.group(0)
         sep = m.group("sep")
@@ -891,7 +993,7 @@ def _linkify_cv_symbols(src: str) -> str:
         return f'<a href="{url}">{sep}{sym}{parens}</a>'
     def repl_bare(m: re.Match) -> str:
         sym = m.group("sym")
-        url = _CV_SYMBOL_URL.get(sym)
+        url = _local_url(sym)
         if not url:
             return m.group(0)
         return f'<a href="{url}">{sym}()</a>'
