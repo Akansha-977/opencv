@@ -199,9 +199,17 @@ if(EXISTS "${_LEGACY_DOXYFILE}")
     "INPUT =${_doxy_input}\n"
     "RECURSIVE = YES\n"
     # Remove cv::traits::* from EXCLUDE_SYMBOLS so Depth<T>/Type<T>/SafeType<T>/SafeFmt<T> get XML.
-    # CV_CREATE_MEMBER_CHECK crashes Doxygen's C++ parser; expand to nothing via PREDEFINED.
     "EXCLUDE_SYMBOLS = cv::DataType<*> int void CV__* T __CV* cv::gapi::detail*\n"
-    "MACRO_EXPANSION = NO\n"
+    # Expand the legacy Doxyfile's PREDEFINED list (CV_EXPORTS*, CV_EXPORTS_AS(x),
+    # CV_WRAP, CV_OUT, CV_IN_OUT, CV_PROP*, … all mapped to nothing) so those
+    # binding macros are stripped from signatures, exactly as the legacy HTML
+    # build does. Without this they leak into the C++ signatures and, worse,
+    # CV_EXPORTS_AS(name) corrupts Doxygen's parse (macro lands in <name>, args
+    # get truncated). EXPAND_ONLY_PREDEF=YES confines expansion to that list, so
+    # heavy macros like CV_CREATE_MEMBER_CHECK stay unexpanded and can't crash
+    # the parser (the reason expansion was previously disabled wholesale).
+    "MACRO_EXPANSION = YES\n"
+    "EXPAND_ONLY_PREDEF = YES\n"
   )
   find_program(DOXYGEN_EXE NAMES doxygen)
   if(DOXYGEN_EXE)

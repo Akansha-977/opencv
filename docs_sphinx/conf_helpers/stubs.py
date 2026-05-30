@@ -1,6 +1,6 @@
 """API-reference stub writers. Entry point: ``_generate_api_stubs``."""
 from __future__ import annotations
-import pathlib, re, os as _os, shutil as _shutil, textwrap as _textwrap
+import pathlib, os as _os, shutil as _shutil, textwrap as _textwrap
 from .state import *
 from .xml_render import *
 from .examples import (
@@ -389,8 +389,6 @@ def _write_api_stub(node: dict, out_dir: pathlib.Path,
                 label = f"{m['name']}{_md_escape_cell(m['args'])}"
                 sig_link = _member_anchor_link(m, label)
                 if _rich_return:
-                    # Hide the Doxygen-visible CV_EXPORTS* macro (live docs do).
-                    ret_type = re.sub(r"^CV_EXPORTS(?:_[A-Z]+)?\s+", "", ret_type)
                     storage = "static " if m.get("static") else ""
                     if m.get("template"):
                         ret = f"`{m['template']}`<br>`{storage}{ret_type}`"
@@ -554,7 +552,7 @@ def _write_api_stub(node: dict, out_dir: pathlib.Path,
         lines.append("")
 
     # Detail blocks via `_render_member_detail` (breathe chokes); macros keep
-    # `{doxygendefine}`; enums/class-members/template-specs skipped.
+    # `{doxygendefine}`; enum detail is hand-rolled (core_basic only).
     seen_define_names: set[str] = set()
     for kind_key, section_title in _MEMBERDEF_SECTIONS:
         items = node["sections"].get(section_title, [])
@@ -618,13 +616,21 @@ def _write_api_stub(node: dict, out_dir: pathlib.Path,
                 # on the `<code>` keeps the existing light-mode-blue
                 # CSS rule applicable.
                 _enum_href = f"#{m['name'].lower()}"
+                # Encode the `::` separator in the anchor text. Without
+                # this, `_translate`'s `_linkify_cv_symbols` pass sees
+                # the plain `cv::Foo` text inside our `<a>` and wraps it
+                # with a second, external `docs.opencv.org` anchor —
+                # the inner anchor wins on click and the user gets
+                # bounced off-site. Entities render as `:` in the
+                # browser so the displayed text is unchanged.
+                _qual_safe = _qual.replace("::", "&#58;&#58;")
                 blk: list[str] = [
                     f"({_eid})=",
                     f"### {m['name']}",
                     "",
                     f'<code class="docutils literal notranslate opencv-enum-sig">'
                     f'{_keyword} <a class="reference internal" '
-                    f'href="{_enum_href}">{_qual}</a></code>',
+                    f'href="{_enum_href}">{_qual_safe}</a></code>',
                     "",
                 ]
                 # `#include <…>` line — the live Doxygen page shows this
@@ -787,7 +793,7 @@ def _render_core_basic_func(m: dict, idx: int, total: int,
     head = f"### {short}(){suffix}"
     out = [f"{head} {{#{slug}}}" if emit_anchor else head, ""]
     # Template clause + signature as inline code (keeps token-linkifier active).
-    ret = re.sub(r"^CV_EXPORTS(?:_[A-Z]+)?\s+", "", m.get("type") or "")
+    ret = m.get("type") or ""
     storage = ("static " if m.get("static") else "") \
         + ("inline " if m.get("inline") else "")
     qname = m["qualified"] or m["name"]
@@ -910,12 +916,7 @@ def _write_class_stub(cls: dict, out_dir: pathlib.Path,
             lines += ["{.api-reference-table}",
                       "| Return | Name | Description |", "|---|---|---|"]
             for m in non_enum_items:
-                # ret = _md_escape_cell(m["type"]) or "&nbsp;"
-                ret_type = m["type"] or ""
-                # Strip CV_EXPORTS* macros and excess whitespace
-                ret_type = __import__("re").sub(
-                    r'\bCV_EXPORTS(?:_W|_AS\([^)]*\))?\s*', '', ret_type).strip()
-                ret = _md_escape_cell(ret_type) or "&nbsp;"
+                ret = _md_escape_cell(m["type"]) or "&nbsp;"
                 if m["static"]:
                     ret = "static " + ret
                 sig = f"{m['name']}{_md_escape_cell(m['args'])}"
