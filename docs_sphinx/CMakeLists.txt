@@ -198,7 +198,9 @@ if(EXISTS "${_LEGACY_DOXYFILE}")
     "DIRECTORY_GRAPH = NO\n"
     "INPUT =${_doxy_input}\n"
     "RECURSIVE = YES\n"
-    # CV_CREATE_MEMBER_CHECK expands to complex template code that crashes Doxygen; disable expansion entirely.
+    # Remove cv::traits::* from EXCLUDE_SYMBOLS so Depth<T>/Type<T>/SafeType<T>/SafeFmt<T> get XML.
+    # CV_CREATE_MEMBER_CHECK crashes Doxygen's C++ parser; expand to nothing via PREDEFINED.
+    "EXCLUDE_SYMBOLS = cv::DataType<*> int void CV__* T __CV* cv::gapi::detail*\n"
     "MACRO_EXPANSION = NO\n"
   )
   find_program(DOXYGEN_EXE NAMES doxygen)
