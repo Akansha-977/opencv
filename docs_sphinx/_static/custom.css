@@ -58,6 +58,36 @@ html[data-theme="dark"] .bd-article-container a { color: #539bf5 !important; }
 html[data-theme="dark"] .bd-article-container a:hover { color: #6cb6ff !important; }
 .bd-content a > code, .bd-content code > a { color: inherit; }
 
+/* Enum-detail-block include line: the `<a>` lives inside a `<code>`
+ * (rendered as `#include <opencv2/core/mat.hpp>`), so the rule above
+ * would otherwise force it to the code text color. Restore the theme
+ * link blue on the path itself in light mode; dark mode is left to the
+ * inherit cascade so we don't change anything there. */
+html:not([data-theme="dark"]) .bd-content code > a.opencv-include-link {
+    color: var(--pst-color-link, #0969da) !important;
+}
+
+/* Enum-detail-block signature line: same problem — the clickable enum
+ * type name (`cv::AccessFlag` in `enum cv::AccessFlag`) is an `<a>`
+ * inside a `<code>` and gets dimmed by the `code > a { color: inherit }`
+ * rule. The stub-generator emits the `<code>` with class
+ * `opencv-enum-sig` so we can scope this override to enum signatures
+ * only. Dark mode is left alone. */
+html:not([data-theme="dark"]) .bd-content code.opencv-enum-sig > a {
+    color: var(--pst-color-link, #0969da) !important;
+}
+
+/* Enumerations summary synopsis: each `cv::…` token is its own `<a>`
+ * inside a `<pre>` code block. The block's `.highlight` styling makes
+ * descendants default to the code text color; force the theme link
+ * blue on the anchors themselves in light mode. Dark mode is left
+ * alone. The selector also forces blue on the inner `.n` Pygments
+ * span so the syntax-highlight class doesn't win the cascade. */
+html:not([data-theme="dark"]) .bd-content .opencv-enum-clickable a,
+html:not([data-theme="dark"]) .bd-content .opencv-enum-clickable a span {
+    color: var(--pst-color-link, #0969da) !important;
+}
+
 /* --- Front-matter table (.opencv-meta-table) --------------------------- */
 .opencv-meta-table,
 .opencv-meta-table .pst-scrollable-table-container { margin: 0 !important; padding: 0 !important; }

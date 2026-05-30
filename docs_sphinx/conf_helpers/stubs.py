@@ -294,15 +294,93 @@ def _write_api_stub(node: dict, out_dir: pathlib.Path,
             # "Enumeration Type Documentation" section emitted by the
             # detail loop below.
             _enum_more_link = (name == "core_basic")
+            # On core_basic the synopsis is emitted as raw HTML (NOT a
+            # ```cpp code fence) so every `cv::…` token becomes its own
+            # `<a>` linking to the enum's detail block. The user's spec
+            # is "anything starting with cv:: is clickable, blue in
+            # light mode, and the `=initializer` tail must NOT be part
+            # of the link." We hand-roll Pygments-style spans (`k`, `n`,
+            # `p`) so the existing `.highlight pre` styling kicks in and
+            # the synopsis still looks like a code block.
+            _clickable_synopsis = (name == "core_basic")
+            import html as _html_mod
             for m in members:
                 _more = ""
                 if _enum_more_link:
-                    _eid = _sphinx_cpp_v4_id(m["qualified"] or m["name"])
-                    _more = f"[More...](#{_eid})"
-                # Synopsis first, then the brief+more line below it.
-                out.append("```cpp")
-                out.extend(_enum_synopsis_lines(m))
-                out.append("```")
+                    # Link to the enum detail block's heading-slug id
+                    # (`### AccessFlag` → `#accessflag`). Same target
+                    # the clickable synopsis tokens use, and a literal
+                    # match on the actual element id on the page —
+                    # whereas `#_CPPv4…E` would be slugified to
+                    # `cppv4…e` by MyST and the link would resolve
+                    # nowhere.
+                    _more = f"[More...](#{m['name'].lower()})"
+                # Synopsis block.
+                if _clickable_synopsis:
+                    _qual = m["qualified"] or m["name"]
+                    _is_strong = bool(m.get("strong"))
+                    # Scoped enums render as `enum struct` in the
+                    # summary synopsis (matches the user's spec for the
+                    # Param block — Doxygen reports `strong="yes"` for
+                    # `enum class` declarations, and the displayed
+                    # keyword on this page should be `enum struct`).
+                    _keyword = "enum struct" if _is_strong else "enum"
+                    # Enumerator-name prefix: scoped → "cv::EnumName::",
+                    # unscoped → the enum's parent scope (so values
+                    # render as `cv::ACCESS_READ`, matching the live
+                    # Doxygen page).
+                    if _is_strong:
+                        _val_prefix = _qual + "::"
+                    elif "::" in _qual:
+                        _val_prefix = _qual.rsplit("::", 1)[0] + "::"
+                    else:
+                        _val_prefix = ""
+                    _href = f"#{m['name'].lower()}"  # enum detail block id
+                    # HTML-entity-encode the `::` separator inside the
+                    # anchor TEXT. `_translate`'s `_linkify_cv_symbols`
+                    # pass (translate.py) runs after this raw HTML is
+                    # written and wraps every `cv::Name` text it sees in
+                    # an external `docs.opencv.org` `<a>` — that would
+                    # nest a second anchor inside ours and steal the
+                    # click. Encoding the colons keeps the displayed
+                    # text identical (`cv::…` in the browser) while
+                    # making the regex `cv(?:\.|::)` skip past it.
+                    def _safe(s: str) -> str:
+                        return _html_mod.escape(s).replace("::", "&#58;&#58;")
+                    out.append(
+                        '<div class="highlight-cpp notranslate '
+                        'opencv-enum-clickable"><div class="highlight"><pre>'
+                    )
+                    out.append(
+                        f'<span class="k">{_html_mod.escape(_keyword)}</span> '
+                        f'<a class="reference internal" href="{_href}">'
+                        f'<span class="n">{_safe(_qual)}</span></a> '
+                        f'<span class="p">{{</span>'
+                    )
+                    _vals = m.get("enum_values") or []
+                    for _i, _v in enumerate(_vals):
+                        _comma = ('<span class="p">,</span>'
+                                  if _i < len(_vals) - 1 else '')
+                        _init = (' ' + _html_mod.escape(_v["initializer"])
+                                 if _v.get("initializer") else '')
+                        _full = _val_prefix + _v["name"]
+                        out.append(
+                            f'    <a class="reference internal" href="{_href}">'
+                            f'<span class="n">{_safe(_full)}</span></a>'
+                            f'{_init}{_comma}'
+                        )
+                    out.append('<span class="p">}</span></pre></div></div>')
+                    # Blank line closes the HTML block per CommonMark
+                    # rule 7. Without it the description + "More..."
+                    # markdown line that follows would be swallowed as
+                    # raw text continuation of the synopsis div, leaving
+                    # `[More...](#…)` visible verbatim instead of as a
+                    # rendered link.
+                    out.append("")
+                else:
+                    out.append("```cpp")
+                    out.extend(_enum_synopsis_lines(m))
+                    out.append("```")
                 if m["brief"]:
                     line = _md_escape_cell(m["brief"])
                     if _more:
@@ -387,15 +465,91 @@ def _write_api_stub(node: dict, out_dir: pathlib.Path,
                 continue
             if kind_key == "enum":
                 # core_basic-only path (gated by the early `continue` above).
-                # Breathe's `{doxygenenum}` handles cv:: enums reliably and
-                # emits the `_CPPv4N2cv<len><name>E` anchor that the
-                # synopsis "More..." link targets.
-                blocks.append([
-                    f"```{{doxygenenum}} {m['qualified'] or m['name']}",
-                    ":project: opencv",
-                    "```",
+                # Hand-rolled in place of `{doxygenenum}` — breathe's directive
+                # drops every enumerator's initializer and `briefdescription`
+                # (renders the `<dd>` empty), so the live page's per-value
+                # `=1<<24` constants and one-line descriptions vanished.
+                # Pulling from the XML metadata ourselves restores them.
+                _qual = m["qualified"] or m["name"]
+                _eid = _sphinx_cpp_v4_id(_qual)        # "More..." target
+                _is_strong = bool(m.get("strong"))
+                _keyword = "enum class" if _is_strong else "enum"
+                # Heading is just the short name (`AccessFlag`,
+                # `DataLayout`, …) — matching the live page's per-enum
+                # title. The `enum cv::Foo` signature line lives in the
+                # body below.
+                # Signature line emitted as raw HTML rather than a
+                # markdown code span: we need the FULL `cv::EnumName` to
+                # be a single clickable anchor, but translate step 8g's
+                # auto-tokenizer would only wrap the bare `EnumName`
+                # part (leaving `cv::` outside the link). Hand-rolling
+                # the `<code><a>cv::EnumName</a></code>` ourselves
+                # bypasses the tokenizer; the `opencv-enum-sig` class
+                # on the `<code>` keeps the existing light-mode-blue
+                # CSS rule applicable.
+                _enum_href = f"#{m['name'].lower()}"
+                blk: list[str] = [
+                    f"({_eid})=",
+                    f"### {m['name']}",
                     "",
-                ])
+                    f'<code class="docutils literal notranslate opencv-enum-sig">'
+                    f'{_keyword} <a class="reference internal" '
+                    f'href="{_enum_href}">{_qual}</a></code>',
+                    "",
+                ]
+                # `#include <…>` line — the live Doxygen page shows this
+                # immediately under the signature, with the header path
+                # rendered as a blue link to its Doxygen file page. The
+                # link target comes from the tagfile's `<compound
+                # kind="file">` entries via `_FILE_URL`; the prefix
+                # `../../../doc/doxygen/html/` matches how the navbar
+                # reaches the Doxygen tree from an `api/<page>.html`
+                # (depth-1 page → 3 levels up to the build root).
+                if m.get("include_file"):
+                    _ipath = m["include_file"]
+                    _ifile = _FILE_URL.get(_ipath)
+                    if _ifile:
+                        _href = f"../../../doc/doxygen/html/{_ifile}"
+                        # The `opencv-include-link` class lets the
+                        # light-mode CSS rule beat the generic
+                        # `code > a { color: inherit }` cascade in
+                        # custom.css (which would otherwise drop the
+                        # link's blue color).
+                        blk += [
+                            f'<code class="docutils literal notranslate">'
+                            f'#include &lt;<a class="reference external '
+                            f'opencv-include-link" '
+                            f'href="{_href}">{_ipath}</a>&gt;</code>',
+                            "",
+                        ]
+                    else:
+                        blk += [f"`#include <{_ipath}>`", ""]
+                if m.get("brief"):
+                    blk += [m["brief"], ""]
+                if m.get("detailed"):
+                    blk += [m["detailed"], ""]
+                _vals = m.get("enum_values") or []
+                if _vals:
+                    blk += ["**Enumerator:**", "",
+                            "| | |", "|---|---|"]
+                    for _v in _vals:
+                        _nm = _v["name"]
+                        _init = _v.get("initializer") or ""
+                        _vbrief = (_v.get("brief") or "").replace("|", "\\|").replace("\n", " ")
+                        # Cell shows the enumerator name (as a code chip)
+                        # and, when a Python binding exists, the
+                        # `Python: cv.NAME` line below it. The C++
+                        # initializer (`=1<<24`, `= 0`, `=ACCESS_RW`,
+                        # …) is intentionally omitted — it adds noise
+                        # without conveying anything readers can't get
+                        # from the synopsis above.
+                        _cell = f"`{_nm}`"
+                        _py = _python_enum_name(_qual, _nm, _is_strong)
+                        if _py:
+                            _cell = f"{_cell}<br>Python: `{_py}`"
+                        blk.append(f"| {_cell} | {_vbrief} |")
+                    blk.append("")
+                blocks.append(blk)
                 continue
             if kind_key == "define":
                 # Macros aren't namespaced; dedupe arity-overloaded ones.

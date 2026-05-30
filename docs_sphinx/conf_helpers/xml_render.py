@@ -152,6 +152,10 @@ def _parse_member_sections(cd) -> dict[str, list[dict]]:
                     enum_values.append({
                         "name":        (ev.findtext("name") or "").strip(),
                         "initializer": (ev.findtext("initializer") or "").strip(),
+                        # Per-enumerator brief — needed by the hand-rolled
+                        # enum detail block on core_basic (the class-member
+                        # extractor below already captures this).
+                        "brief":       _itertext(ev.find("briefdescription")).strip(),
                     })
             _dtl, _params, _returns = _member_detail_parts(md)
             _loc = md.find("location")
