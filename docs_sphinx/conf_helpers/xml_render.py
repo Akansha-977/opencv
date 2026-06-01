@@ -17,10 +17,55 @@ def _wrap_emphasis(inner: str, delim: str) -> str:
     return f"{lead}{delim}{stripped}{delim}{trail}"
 
 
+# AMS block environments MyST's `amsmath` extension renders on their own. A
+# `$$`-wrapped body containing `\\` makes Sphinx/docutils nest it inside
+# `\begin{split}`; for a full alignment environment that yields
+# `\[\begin{split}\begin{align*}…\end{align*}\end{split}\]`, which MathJax
+# rejects with "Erroneous nesting of equation structures". Emitting these bare
+# lets the amsmath extension handle them with no split wrapper.
+_AMS_BLOCK_ENVS = frozenset((
+    "align", "align*", "alignat", "alignat*", "flalign", "flalign*",
+    "gather", "gather*", "multline", "multline*",
+    "equation", "equation*", "eqnarray", "eqnarray*",
+))
+
+
+def _render_formula(raw: str) -> str:
+    """Doxygen <formula> -> MyST math. Display `\\[..\\]` -> `$$..$$`, except a
+    standalone AMS alignment environment, emitted bare for the amsmath
+    extension. Inline `$..$` (or anything else) passes through unchanged."""
+    s = (raw or "").strip()
+    if s.startswith("\\[") and s.endswith("\\]"):
+        inner = s[2:-2].strip()
+        m = re.match(r"^\\begin\{([a-zA-Z]+\*?)\}", inner)
+        if (m and m.group(1) in _AMS_BLOCK_ENVS
+                and inner.rstrip().endswith("\\end{%s}" % m.group(1))):
+            return f"\n\n{inner}\n\n"
+        return f"\n\n$$\n{inner}\n$$\n\n"
+    return s
+
+
+def _render_image(node) -> str:
+    """Render a Doxygen <image> as a Markdown image. Doxygen duplicates each
+    `@image` once per output format (html, latex, rtf, docbook, xml); we keep
+    only the html variant — emitting all five would repeat the caption (or a
+    blank embed) five times. Resolves the basename via `_IMAGE_INDEX`; returns
+    '' for non-html variants or unresolved files (so the caption never leaks
+    into the prose as bare text)."""
+    if node.get("type") != "html":
+        return ""
+    name = (node.get("name") or "").strip()
+    caption = "".join(node.itertext()).strip()
+    hit = _IMAGE_INDEX.get(name)
+    if not hit:
+        return ""
+    return f"![{caption}](/{hit})"
+
+
 def _itertext(el) -> str:
     """Flatten an XML element's inner text. None-safe.
     Converts Doxygen <formula> elements to MyST-compatible math syntax:
-      \\[...\\]  →  $$\\n...\\n$$   (display math)
+      \\[...\\]  →  $$\\n...\\n$$   (display math; AMS envs emitted bare)
       $...$      →  $...$           (inline math, unchanged)
     """
     if el is None:
@@ -29,14 +74,9 @@ def _itertext(el) -> str:
 
     def _walk(node) -> None:
         if node.tag == "formula":
-            text = (node.text or "").strip()
-            if text.startswith("\\[") and text.endswith("\\]"):
-                # Display math: wrap in $$ ... $$ on its own lines.
-                inner = text[2:-2].strip()
-                parts.append(f"\n\n$$\n{inner}\n$$\n\n")
-            else:
-                # Inline math ($...$) or unknown — pass through unchanged.
-                parts.append(text)
+            parts.append(_render_formula(node.text or ""))
+        elif node.tag == "image":
+            parts.append(_render_image(node))   # caption text not recursed
         else:
             if node.text:
                 parts.append(node.text)
@@ -113,12 +153,22 @@ def _member_detail_parts(md):
                     nm = ", ".join(
                         t for t in (_itertext(n) for n in
                                     it.findall(".//parametername")) if t)
-                    d = _itertext(it.find("parameterdescription"))
+                    # Block-aware: a description carrying an <itemizedlist>
+                    # (e.g. calibration `flags`) keeps its bullets as real
+                    # Markdown instead of collapsing into a run-on paragraph.
+                    d = _doxygen_desc_to_md(it.find("parameterdescription"))
                     if nm:
                         params.append((nm, d))
         for ss in para.findall("simplesect"):
             if ss.get("kind") == "return":
-                returns = _itertext(ss)
+                # Block-aware conversion — same treatment we give
+                # parameter descriptions a few lines above. Using
+                # `_itertext` here flattened the simplesect to plain
+                # text, dropping <ref> cross-references, <ulink>
+                # external links, <computeroutput> inline code,
+                # <formula> math, and <itemizedlist> bullets — so the
+                # live page's richer Returns content vanished.
+                returns = _doxygen_desc_to_md(ss)
     # Prune the param/return chrome (rendered separately) then convert the rest
     # with full block support so lists and notes survive.
     pruned = _copy.deepcopy(de)
@@ -167,6 +217,19 @@ def _parse_member_sections(cd) -> dict[str, list[dict]]:
                 arr = (p.findtext("array") or "").strip()
                 return (t + arr) if arr else t
             param_types = [_param_type(p) for p in md.findall("param")]
+            # (type, name, default) per parameter — drives the multi-line,
+            # column-aligned function signature in the detail card.
+            def _param_sig(p) -> tuple:
+                return (_param_type(p),
+                        (p.findtext("declname") or "").strip(),
+                        _itertext(p.find("defval")))
+            params_sig = [_param_sig(p) for p in md.findall("param")]
+            # Function-like macro params carry only a <defname> (no type/declname).
+            macro_params = ([(p.findtext("defname") or "").strip()
+                             for p in md.findall("param")] if kind == "define"
+                            else [])
+            # `= value` for a variable; the macro body for a define.
+            initializer = _itertext(md.find("initializer"))
             enum_values = []
             is_strong = md.get("strong", "no") == "yes"
             if kind == "enum":
@@ -174,14 +237,13 @@ def _parse_member_sections(cd) -> dict[str, list[dict]]:
                     enum_values.append({
                         "name":        (ev.findtext("name") or "").strip(),
                         "initializer": (ev.findtext("initializer") or "").strip(),
-                        # Per-enumerator brief — needed by the hand-rolled
-                        # enum detail block on core_basic (the class-member
-                        # extractor below already captures this).
-                        "brief":       _itertext(ev.find("briefdescription")).strip(),
+                        # Per-enumerator brief for the detail block.
+                        "brief":       _enum_value_desc(ev),
                     })
             _dtl, _params, _returns = _member_detail_parts(md)
             _loc = md.find("location")
-            _include_file = (_loc.get("file") if _loc is not None else "") or ""
+            _include_file = _normalize_include(
+                (_loc.get("file") if _loc is not None else "") or "")
             member = {
                 "id":          md.get("id", ""),
                 "kind":        kind,
@@ -190,6 +252,9 @@ def _parse_member_sections(cd) -> dict[str, list[dict]]:
                 "type":        _itertext(md.find("type")),
                 "args":        (md.findtext("argsstring") or "").strip(),
                 "param_types": param_types,
+                "params_sig":  params_sig,
+                "macro_params": macro_params,
+                "initializer": initializer,
                 "brief":       _itertext(md.find("briefdescription")),
                 "enum_values": enum_values,
                 "strong":      is_strong,
@@ -313,12 +378,7 @@ def _doxygen_desc_to_md(el, h_level: int = 3) -> str:
             url = f"{DOXYGEN_BASE_URL}{refid}.html"
         return f"[`{text}`]({url})"
 
-    def _formula_md(raw: str) -> str:
-        """Doxygen <formula> -> MyST math. Display \\[..\\] -> $$..$$; inline kept."""
-        s = (raw or "").strip()
-        if s.startswith(r"\[") and s.endswith(r"\]"):
-            return f"\n\n$$\n{s[2:-2].strip()}\n$$\n\n"
-        return s
+    _formula_md = _render_formula
 
     _BLOCK_TAGS = {"orderedlist", "itemizedlist", "programlisting", "simplesect", "table"}
 
@@ -414,6 +474,8 @@ def _doxygen_desc_to_md(el, h_level: int = 3) -> str:
             if t == "ulink":
                 url = child.get("url", "")
                 parts.append(f"[{inner}]({url})" if url else inner)
+            elif t == "image":
+                parts.append(_render_image(child))
             elif t == "ref":
                 parts.append(_ref_link(child.get("refid", ""), inner))
             elif t == "computeroutput":
@@ -479,6 +541,8 @@ def _doxygen_desc_to_md(el, h_level: int = 3) -> str:
                         if st == "ulink":
                             url = sub.get("url", "")
                             pending.append(f"[{inner}]({url})" if url else inner)
+                        elif st == "image":
+                            pending.append(_render_image(sub))
                         elif st == "ref":
                             pending.append(_ref_link(sub.get("refid", ""), inner))
                         elif st == "computeroutput":
@@ -526,6 +590,38 @@ def _doxygen_desc_to_md(el, h_level: int = 3) -> str:
                 continue
         merged.append(block)
     return "\n\n".join(merged)
+
+
+def _normalize_include(path: str) -> str:
+    """Reduce a header path to its canonical `opencv2/...` form.
+
+    Doxygen records ABSOLUTE paths for out-of-tree (contrib) modules — e.g.
+    `/…/opencv_contrib/modules/cnn_3dobj/include/opencv2/cnn_3dobj.hpp` — which
+    leak into the #include line / source-file footer and miss `_FILE_URL` (so no
+    link). Main-tree headers are already `opencv2/…`. Trim everything up to and
+    including the last `/include/` so both behave identically."""
+    p = (path or "").replace("\\", "/").strip()
+    marker = "/include/"
+    i = p.rfind(marker)
+    return p[i + len(marker):] if i >= 0 else p
+
+
+def _enum_value_desc(ev) -> str:
+    """Block Markdown for one `<enumvalue>` (brief + detailed).
+
+    Doxygen puts a single-sentence enumerator doc in `<briefdescription>` but a
+    multi-paragraph one (or one with `@note`/`@see`) in `<detaileddescription>`
+    — reading only the brief silently drops the latter (e.g. dnn's
+    `DNN_BACKEND_INFERENCE_ENGINE`). Render BOTH with the generic block converter
+    so `@note` becomes a real admonition, lists stay lists, and refs become
+    links — exactly like every other description. The enumerator detail is laid
+    out with a `{list-table}` (not a pipe table) so cells can hold this block
+    content; see `_enumerator_list_table`."""
+    if ev is None:
+        return ""
+    parts = [_doxygen_desc_to_md(ev.find(t)).strip()
+             for t in ("briefdescription", "detaileddescription")]
+    return "\n\n".join(p for p in parts if p)
 
 
 def _md_escape_cell(text: str) -> str:
@@ -689,7 +785,7 @@ def _read_class_data(refid: str, xml_dir: pathlib.Path) -> dict | None:
                     enum_values.append({
                         "name":        (ev.findtext("name") or "").strip(),
                         "initializer": (ev.findtext("initializer") or "").strip(),
-                        "brief":       _itertext(ev.find("briefdescription")).strip(),
+                        "brief":       _enum_value_desc(ev),
                     })
             _dtl, _params, _returns = _member_detail_parts(md)
             items.append({
@@ -700,6 +796,14 @@ def _read_class_data(refid: str, xml_dir: pathlib.Path) -> dict | None:
                 "type":        _itertext(md.find("type")),
                 "args":        (md.findtext("argsstring") or "").strip(),
                 "param_types": [_param_type(p) for p in md.findall("param")],
+                "params_sig":  [(_param_type(p),
+                                 (p.findtext("declname") or "").strip(),
+                                 _itertext(p.find("defval")))
+                                for p in md.findall("param")],
+                "macro_params": ([(p.findtext("defname") or "").strip()
+                                   for p in md.findall("param")]
+                                  if mkind == "define" else []),
+                "initializer": _itertext(md.find("initializer")),
                 "brief":       _itertext(md.find("briefdescription")),
                 "static":      md.get("static") == "yes",
                 "virt":        md.get("virt", "non-virtual"),
@@ -720,7 +824,7 @@ def _read_class_data(refid: str, xml_dir: pathlib.Path) -> dict | None:
     has_detailed = bool(detailed_el is not None and any(
         _itertext(p).strip() for p in detailed_el.findall("para")
     ))
-    include = (cd.findtext("includes") or "").strip()
+    include = _normalize_include(cd.findtext("includes") or "")
     return {
         "name":     (cd.findtext("compoundname") or "").strip(),
         "brief":    _itertext(cd.find("briefdescription")),
@@ -730,12 +834,59 @@ def _read_class_data(refid: str, xml_dir: pathlib.Path) -> dict | None:
     }
 
 
+# Filename -> path for every Doxygen `*graph.svg` (coll/call/caller). Built once
+# per html_root: a single tree walk replaces an rglob per class/function, which
+# matters now that thousands of function detail blocks each look up a graph.
+_GRAPH_SVG_INDEX: dict[str, pathlib.Path] | None = None
+_GRAPH_SVG_ROOT: pathlib.Path | None = None
+
+
+def _graph_svg_index(html_root: pathlib.Path) -> dict[str, pathlib.Path]:
+    global _GRAPH_SVG_INDEX, _GRAPH_SVG_ROOT
+    if _GRAPH_SVG_INDEX is None or _GRAPH_SVG_ROOT != html_root:
+        _GRAPH_SVG_ROOT = html_root
+        _GRAPH_SVG_INDEX = {}
+        if html_root and html_root.is_dir():
+            for p in html_root.rglob("*graph.svg"):
+                _GRAPH_SVG_INDEX.setdefault(p.name, p)
+    return _GRAPH_SVG_INDEX
+
+
 def _find_collaboration_svg(refid: str, html_root: pathlib.Path) -> pathlib.Path | None:
     """Locate the legacy Doxygen HTML collaboration SVG for a class."""
-    if not html_root.is_dir():
-        return None
-    matches = sorted(html_root.rglob(f"{refid}__coll__graph.svg"))
-    return matches[0] if matches else None
+    return _graph_svg_index(html_root).get(f"{refid}__coll__graph.svg")
+
+
+def _find_call_graph_svgs(
+        member: dict,
+        html_root: pathlib.Path) -> list[tuple[pathlib.Path, str, str]]:
+    """Legacy call/caller-graph SVGs for a function member, as (path, intro, alt).
+
+    Bridges the member's XML id to the HTML anchor via `_CALL_GRAPH_ANCHORS`
+    (the SVGs are named after the HTML anchor, not the XML memberdef id)."""
+    if member.get("kind") != "function":
+        return []
+    mid = member.get("id", "")
+    if "_1" not in mid:
+        return []
+    compound = mid.rsplit("_1", 1)[0]
+    name = member.get("name", "")
+    if not (compound and name):
+        return []
+    anchor = _CALL_GRAPH_ANCHORS.get(
+        (compound, name, _norm_args(member.get("args", ""))))
+    if not anchor:
+        return []
+    index = _graph_svg_index(html_root)
+    out: list[tuple[pathlib.Path, str, str]] = []
+    for suffix, intro, kind in (
+        ("cgraph", "Here is the call graph for this function:", "Call"),
+        ("icgraph", "Here is the caller graph for this function:", "Caller"),
+    ):
+        svg = index.get(f"{compound}_{anchor}_{suffix}.svg")
+        if svg is not None:
+            out.append((svg, intro, f"{kind} graph for {name}"))
+    return out
 
 
 def _svg_make_transparent(text: str) -> str:
@@ -767,6 +918,80 @@ def _svg_dark_variant(text: str) -> str:
     # Lookahead avoids double-prefixing per-node texts.
     text = _re.sub(r'<text (?!fill)', '<text fill="#ffffff" ', text)
     return text
+
+
+# Sentence-initial phrases whose subject is the function itself, never a single
+# parameter ("This function returns…", "The function internally…"). When one of
+# these runs on inside a @param description — because the source Doxygen comment
+# omitted the blank line that ends the parameter — the text from the marker
+# onward (and any list it introduces) actually belongs to the function body.
+_SPILLED_PROSE_RE = re.compile(r"\b(?:This|The)\s+(?:function|method)\b")
+
+
+def _hoist_spilled_param_prose(cd) -> bool:
+    """Move function-level prose that ran on into a @param back out into the
+    function's detailed description (authoring fix done at the XML layer so it
+    applies to both breathe and the custom renderer, without touching headers).
+
+    Conservative by design — only fires when ALL of these hold, so a parameter
+    that legitimately contains prose or a bullet list is left untouched:
+      * inside a `<parameterdescription>`, on its first `<para>`;
+      * the marker (`_SPILLED_PROSE_RE`) sits in the para's leading text, so
+        every child element is unambiguously part of the spilled tail;
+      * a real parameter sentence precedes the marker (marker not at offset 0);
+      * the parameter is NOT itself a callback / function pointer, and the kept
+        sentence doesn't describe one — otherwise "This function …" refers to
+        the callback (e.g. createTrackbar's onChange), not the documented one.
+    Returns True if anything changed."""
+    import xml.etree.ElementTree as _ET
+    changed = False
+    for md in cd.iter("memberdef"):
+        if md.get("kind") != "function":
+            continue
+        de = md.find("detaileddescription")
+        if de is None:
+            continue
+        # param name -> declared type, to spot callback / function-pointer params.
+        ptypes: dict = {}
+        for p in md.findall("param"):
+            dn = (p.findtext("declname") or "").strip()
+            te = p.find("type")
+            if dn:
+                ptypes[dn] = "".join(te.itertext()) if te is not None else ""
+        hoisted: list = []
+        for it in de.iter("parameteritem"):
+            pd = it.find("parameterdescription")
+            para = pd.find("para") if pd is not None else None
+            if para is None:
+                continue
+            ptype = " ".join(ptypes.get("".join(n.itertext()).strip(), "")
+                             for n in it.findall(".//parametername"))
+            if "Callback" in ptype or "(*" in ptype or "function<" in ptype:
+                continue
+            text = para.text or ""
+            m = _SPILLED_PROSE_RE.search(text)
+            if m is None or m.start() == 0:
+                continue
+            keep = text[:m.start()].rstrip()
+            if not keep or re.search(r"\b(?:function|callback)\b", keep, re.I):
+                continue
+            spill = _ET.Element("para")
+            spill.text = text[m.start():]
+            for child in list(para):      # all children follow the leading text
+                para.remove(child)
+                spill.append(child)
+            para.text = keep
+            hoisted.append(spill)
+            changed = True
+        if hoisted:
+            # Insert ahead of the <para> carrying the <parameterlist>, so the
+            # prose reads as body text before the parameter table.
+            kids = list(de)
+            at = next((i for i, p in enumerate(kids)
+                       if p.find("parameterlist") is not None), len(kids))
+            for off, sp in enumerate(hoisted):
+                de.insert(at + off, sp)
+    return changed
 
 
 def _patch_namespace_xml_for_breathe(xml_dir: pathlib.Path,
@@ -855,6 +1080,24 @@ def _patch_namespace_xml_for_breathe(xml_dir: pathlib.Path,
             if out_file.is_symlink() or out_file.is_file():
                 out_file.unlink()
             tree.write(out_file, encoding="utf-8", xml_declaration=True)
+
+    # 3b) Hoist function-level prose that ran on into a @param description back
+    #     into the function body. Runs over every mirrored compound (groups
+    #     included) so the fix shows wherever breathe resolves the function.
+    for compound_file in list(out_dir.glob("*.xml")):
+        if compound_file.name == "index.xml":
+            continue
+        try:
+            tree = _ET.parse(compound_file)
+        except _ET.ParseError:
+            continue
+        cd = tree.getroot().find("compounddef")
+        if cd is None:
+            continue
+        if _hoist_spilled_param_prose(cd):
+            if compound_file.is_symlink() or compound_file.is_file():
+                compound_file.unlink()
+            tree.write(compound_file, encoding="utf-8", xml_declaration=True)
 
     # 4) Record completion.
     stamp.touch()
@@ -971,11 +1214,13 @@ def _namespace_innerclasses(ns_name: str, xml_dir: pathlib.Path) -> list[tuple]:
 
 __all__ = [
     "_itertext", "_type_to_md", "_doxygen_desc_to_md",
+    "_enum_value_desc", "_normalize_include",
     "_MEMBERDEF_SECTIONS", "_read_class_brief",
     "_build_api_hierarchy", "_parse_member_sections", "_md_escape_cell",
     "_MEMBER_DIRECTIVE", "_MEMBER_DETAIL_SECTION", "_sphinx_cpp_v4_id",
     "_enum_synopsis_html", "_enum_synopsis_lines", "_function_signature",
     "_class_page_name", "_read_class_data", "_find_collaboration_svg",
+    "_find_call_graph_svgs",
     "_svg_make_transparent", "_svg_dark_variant",
     "_patch_namespace_xml_for_breathe",
     "_build_ns_group_map", "_namespaces_for_group",

@@ -1,8 +1,30 @@
-"""build-finished hook: inline coll-diagram SVGs, strip Breathe clutter."""
+"""build-finished hook: inline coll-diagram SVGs, strip Breathe clutter, re-theme Doxygen."""
 from __future__ import annotations
 import pathlib, re
 
-from .state import DOXYGEN_BASE_URL
+from .state import _doxy_page_to_local, _DOXY_ANCHOR_TO_MEMBER
+
+
+def _doxy_parent_page(page: str, api_dir: pathlib.Path) -> str:
+    """Nested types (e.g. `structcv_1_1SparseMat_1_1Hdr`) get no standalone
+    Sphinx page — they're documented inline on the enclosing class. Walk up the
+    `_1_1`-separated scope to the nearest ancestor page that DOES exist locally.
+    Returns "" if no ancestor page exists."""
+    stem = page[:-5] if page.endswith(".html") else page
+    rest = None
+    for pref in ("class", "struct", "union"):
+        if stem.startswith(pref):
+            rest = stem[len(pref):]
+            break
+    if rest is None:
+        return ""
+    while "_1_1" in rest:
+        rest = rest.rsplit("_1_1", 1)[0]
+        for pref in ("class", "struct", "union"):
+            cand = f"{pref}{rest}.html"
+            if (api_dir / cand).is_file():
+                return cand
+    return ""
 
 
 def _inline_collaboration_svgs(api_dir: pathlib.Path,
@@ -22,10 +44,22 @@ def _inline_collaboration_svgs(api_dir: pathlib.Path,
         if "://" in path:
             return m.group(0)
         base = path.rsplit("/", 1)[-1]
-        if (api_dir / base).is_file():
-            return f'xlink:href="{base}"'
-        rel = path.lstrip("./")
-        return f'xlink:href="{DOXYGEN_BASE_URL}{rel}"'
+        page, _, frag = base.partition("#")   # split off the Doxygen anchor
+        # Resolve the Doxygen page to its Sphinx equivalent; whatever the
+        # original docs linked, link the same — but into the NEW Sphinx docs.
+        local = _doxy_page_to_local(page)
+        if not (api_dir / local).is_file():
+            # Nested type with no own page -> enclosing class page (inline docs).
+            parent = _doxy_parent_page(page, api_dir)
+            if parent:
+                local = parent
+            # else keep `local` even if not generated this build (contrib/CUDA
+            # off, or the _Tp stub) — never fall back to docs.opencv.org.
+        # Jump to the exact member when the Doxygen anchor maps to Sphinx's.
+        member = _DOXY_ANCHOR_TO_MEMBER.get(frag) if frag else None
+        if member:
+            return f'xlink:href="{local}#{member}"'
+        return f'xlink:href="{local}"'
 
     for html in api_dir.glob("*.html"):
         text = html.read_text(encoding="utf-8")
@@ -91,10 +125,29 @@ def _strip_breathe_class_clutter(api_dir: pathlib.Path) -> None:
             h.write_text(new, encoding="utf-8")
 
 
+def _generate_search_map(out_dir: pathlib.Path) -> None:
+    """Write _static/search_map.js: stem→Sphinx-path for every built HTML page."""
+    import json
+    skip = {"_static", "_sources", "_images", "_sphinx_design_static"}
+    mapping = {}
+    for f in out_dir.rglob("*.html"):
+        rel = f.relative_to(out_dir)
+        if rel.parts[0] in skip:
+            continue
+        mapping[f.stem] = rel.as_posix()
+    lines = ["var sphinxPageMap = {"]
+    for k, v in sorted(mapping.items()):
+        lines.append(f"  {json.dumps(k)}: {json.dumps(v)},")
+    lines.append("};")
+    (out_dir / "_static" / "search_map.js").write_text("\n".join(lines), encoding="utf-8")
+
+
 def _inline_coll_graphs_on_finish(app, exception):
     """build-finished entry point."""
     if exception is not None:
         return
     out = pathlib.Path(app.outdir)
-    _inline_collaboration_svgs(out / "api", out / "_images")
-    _strip_breathe_class_clutter(out / "api")
+    for _api in ("main_modules", "extra_modules"):
+        _inline_collaboration_svgs(out / _api, out / "_images")
+        _strip_breathe_class_clutter(out / _api)
+    _generate_search_map(out)

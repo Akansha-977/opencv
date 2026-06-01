@@ -184,7 +184,33 @@ def _translate(text: str, docname: str | None = None) -> str:
         return '\n'.join(out)
     text = _demote_extra_h1s(text)
 
-    # 2. Doxygen LaTeX math markers
+    # 1b. @note / @see -> MyST admonitions; runs BEFORE math so \f[...\f] inside
+    # a note is still one token (no blank-line terminator cuts the body short).
+    _ADMON_KIND = {"note": "note", "see": "seealso", "warning": "warning",
+                   "sa": "seealso"}
+    def _admon_repl(m: re.Match) -> str:
+        kind = _ADMON_KIND[m.group("dir")]
+        raw = m.group("body")
+        lines = raw.split("\n")
+        min_ind = min(
+            (len(l) - len(l.lstrip()) for l in lines if l.strip()), default=0)
+        body = "\n".join(l[min_ind:] for l in lines).strip()
+        return f"\n:::{{{kind}}}\n{body}\n:::\n"
+    text = re.sub(
+        r"^[ \t]*@(?P<dir>note|see|warning|sa)[ \t]*\n?(?P<body>.+?)(?=\n[ \t]*\n|\n[ \t]*@[A-Za-z]|\Z)",
+        _admon_repl, text, flags=re.DOTALL | re.MULTILINE)
+
+    # 2. Doxygen LaTeX math markers; preserve indent so blocks inside list items stay in the list.
+    def _split_adj_math(m: re.Match) -> str:
+        indent = m.group("indent")
+        return m.group(0).replace("\\f]\\f[", f"\\f]\n{indent}\\f[")
+    text = re.sub(r"^(?P<indent>[ \t]*)[^\n]*\\f\]\\f\[",
+                  _split_adj_math, text, flags=re.MULTILINE)
+    def _fblock(m: re.Match) -> str:
+        ind = m.group("indent")
+        return f"\n{ind}$$\n{m.group('body').strip()}\n{ind}$$\n"
+    text = re.sub(r"^(?P<indent>[ \t]*)\\f\[(?P<body>.+?)\\f\]",
+                  _fblock, text, flags=re.DOTALL | re.MULTILINE)
     text = re.sub(r"\\f\[(.+?)\\f\]",
                   lambda m: f"\n$$\n{m.group(1).strip()}\n$$\n",
                   text, flags=re.DOTALL)
@@ -331,44 +357,13 @@ def _translate(text: str, docname: str | None = None) -> str:
         r"@link\s+(?P<target>[\w-]+)(?P<disp>.*?)@endlink",
         _link_repl, text, flags=re.DOTALL)
 
-
-    if docname == "api/core_basic":
-        _vec_rows_re = re.compile(
-            r"(?:^\| `Vec<[^`]*` \| [^\n]*\n)+", re.MULTILINE)
-        _vm = _vec_rows_re.search(text)
-        if _vm:
-            _vec_rows = _vm.group(0)
-            text = text[:_vm.start()] + text[_vm.end():]
-            _shorter = (
-                "## Shorter aliases for the most popular specializations of "
-                "Vec<T,n>\n\n"
-                # Carry the `.api-typedef-table` class so the section
-                # inherits the same table styling (and the light-mode
-                # blue Type-cell anchor rule) as the main Typedefs table
-                # above.
-                "{.api-typedef-table}\n"
-                "| Type | Name | Description |\n"
-                "|---|---|---|\n"
-                + _vec_rows + "\n")
-            text = text.replace(
-                "## Typedef Documentation",
-                _shorter + "## Typedef Documentation",
-                1)
-
-        # 8c. `{doxygentypedef} cv::Ptr` -> hand-rolled cpp:type (breathe skips C++11 aliases).
-        text = re.sub(
-            r"```\{doxygentypedef\} cv::Ptr\s*\n:project: opencv\s*\n```",
-            "```{eval-rst}\n"
-            ".. cpp:namespace:: cv\n"
-            ".. cpp:type:: template<typename _Tp> Ptr = std::shared_ptr<_Tp>\n"
-            "```",
-            text)
-
-        # 8e. Classes table rows: append template params + "View details" link.
+    # 8e. Class summary rows (ALL API pages): append template params + a
+    # "View details" link to the class detail page, like the legacy docs.
+    if docname and (docname.startswith("main_modules/") or docname.startswith("extra_modules/")):
         def _rewrite_class_row(m: re.Match) -> str:
             kind = m.group("kind")
-            name = m.group("name")       # 'cv::Mat_'
-            page = m.group("page")       # 'classcv_1_1Mat__'
+            name = m.group("name")       # 'cv::dnn::BackendNode'
+            page = m.group("page")       # 'classcv_1_1dnn_1_1BackendNode'
             desc = m.group("desc").strip()
             short = name.split("::")[-1]
             tparams = _CLASS_TEMPLATE_DISPLAY.get(short, "")
@@ -381,10 +376,7 @@ def _translate(text: str, docname: str | None = None) -> str:
             # "Detailed Description" section (`_write_class_stub`
             # populates `_CLASSES_WITH_DETAIL` for those). Otherwise the
             # link would land at the top of a page that has nothing
-            # extra to show — drop it entirely, leaving just the
-            # description cell unchanged. Emitted as raw HTML so the
-            # `opencv-class-more` class survives MyST processing and the
-            # theme rule can style it.
+            # extra to show — drop it, leaving just the description.
             if page in _CLASSES_WITH_DETAIL:
                 more = (f'<a class="opencv-class-more" '
                         f'href="{page}.html#detailed-description">'
@@ -403,13 +395,18 @@ def _translate(text: str, docname: str | None = None) -> str:
             r" \| (?P<desc>[^\n|]*?) \|",
             _rewrite_class_row, text)
 
-        # 8a. Name-column typedef anchors: the stub emits a `#group__…` in-page
-        #     link, but the detail block's MyST `({refid})=` target is rendered
-        #     by Sphinx as a slug-normalized id (`__`/`_` runs collapsed to a
-        #     single `-`). Without rewriting, the literal `#group__…` link
-        #     fragment doesn't match the slugified id, so the click does
-        #     nothing. Normalize the link fragment the same way Sphinx
-        #     normalizes the target id so the two sides agree.
+
+    if docname == "main_modules/core_basic":
+        # 8c. `{doxygentypedef} cv::Ptr` -> hand-rolled cpp:type (breathe skips C++11 aliases).
+        text = re.sub(
+            r"```\{doxygentypedef\} cv::Ptr\s*\n:project: opencv\s*\n```",
+            "```{eval-rst}\n"
+            ".. cpp:namespace:: cv\n"
+            ".. cpp:type:: template<typename _Tp> Ptr = std::shared_ptr<_Tp>\n"
+            "```",
+            text)
+
+        # 8a. Name-column typedef anchors -> slugified detail-block id.
         text = re.sub(
             r"\[`(?P<name>[A-Za-z_][A-Za-z0-9_]*)`\]"
             r"\(#(?P<ref>group__[a-z0-9_]+?_1[a-z0-9]+)\)",
@@ -456,7 +453,7 @@ def _translate(text: str, docname: str | None = None) -> str:
                 full = _LIVE_CLASS_URL.get(cls)
                 if not full:
                     return m.group(0)
-                href = pathlib.PurePosixPath(full).name  # same api/ directory
+                href = pathlib.PurePosixPath(full).name  # same module directory
                 rest_esc = (rest.replace("&", "&amp;")
                                 .replace("<", "&lt;")
                                 .replace(">", "&gt;"))
@@ -467,86 +464,93 @@ def _translate(text: str, docname: str | None = None) -> str:
                 r"`(?P<cls>[A-Z][A-Za-z0-9_]*)(?P<rest><[^`\n]*>)`",
                 _linkify_class_codespan, text)
 
-        # 8g. Linkify tokens step 8b missed: inner 8b `<code>`, then plain code spans.
-        if _LOCAL_CLASS_URL or _LOCAL_TYPEDEF_URL:
-            def _token_url(tok: str) -> str | None:
-                # Tokens absent from the tagfile stay plain.
-                return _LOCAL_CLASS_URL.get(tok) or _LOCAL_TYPEDEF_URL.get(tok)
-            # Optional `cv::` prefix is part of the match so the emitted
-            # anchor spans `cv::Name` (not just `Name`). URL lookup
-            # strips the prefix before consulting the tagfile maps.
-            _tok_re = re.compile(r"(?:cv::)?_?[A-Za-z][A-Za-z0-9_]*")
-            def _bare(tok: str) -> str:
-                return tok[4:] if tok.startswith("cv::") else tok
-            def _anchor_text(tok: str) -> str:
-                # HTML-entity-encode the `::` separator so the later
-                # `_linkify_cv_symbols` pass (which runs after step 8g
-                # has already converted markdown to HTML, so its
-                # `_apply_outside_code` no longer recognizes our token
-                # text as "inside code") doesn't match `cv::Name` and
-                # wrap a second external `docs.opencv.org` anchor
-                # inside ours — that would nest and steal the click.
-                # Browsers decode the entities back to `:` on render.
-                return tok.replace("::", "&#58;&#58;")
-            def _linkify_html_segment(seg: str) -> str:
-                def _sub(m: re.Match) -> str:
-                    url = _token_url(_bare(m.group(0)))
-                    if not url:
-                        return m.group(0)
-                    return (f'<a class="reference internal" '
-                            f'href="{url}">{_anchor_text(m.group(0))}</a>')
-                return _tok_re.sub(_sub, seg)
-            def _linkify_inside_code(m: re.Match) -> str:
-                inner = m.group("inner")
-                out, i, n = [], 0, len(m.group("inner"))
-                while i < n:
-                    if inner.startswith("<a ", i):
-                        j = inner.find("</a>", i)
-                        if j < 0:
-                            out.append(inner[i:]); break
-                        out.append(inner[i:j + 4]); i = j + 4
-                    else:
-                        k = inner.find("<a ", i)
-                        if k < 0:
-                            out.append(_linkify_html_segment(inner[i:])); break
-                        out.append(_linkify_html_segment(inner[i:k])); i = k
-                return m.group("open") + "".join(out) + m.group("close")
-            text = re.sub(
-                r'(?P<open><code class="docutils literal notranslate">)'
-                r'(?P<inner>.*?)(?P<close></code>)',
-                _linkify_inside_code, text, flags=re.DOTALL)
+        # NOTE: step 8g (token linkifier) used to live here, but it was
+        # too narrowly gated to core_basic — moved out of this block so
+        # parameter types like `InputArrayOfArrays`, `Size`,
+        # `TermCriteria`, etc. become clickable in EVERY api page's
+        # Functions table + Function Documentation detail blocks.
+        # See the broader-gated step 8g immediately below.
 
-            def _linkify_markdown_codespan(m: re.Match) -> str:
-                content = m.group("content")
-                # Same prefix-aware match as in `_linkify_html_segment`:
-                # `cv::Name` becomes one hit so the wrapping anchor
-                # covers both pieces.
-                hits = [(t.start(), t.end(), t.group(0)) for t in
-                        _tok_re.finditer(content)
-                        if _token_url(_bare(t.group(0)))]
-                if not hits:
+    # 8g. Linkify recognized type tokens in code spans across every API
+    # page (Functions summary + Function Documentation detail blocks).
+    # Was previously gated to `main_modules/core_basic` only — that
+    # left parameter types in other module pages (calib, dnn, …) as
+    # plain code chips even though their local typedef/class targets
+    # exist. Pass 1 walks any existing `<code>` HTML left by step 8b;
+    # pass 2 walks remaining markdown code spans.
+    if (docname and (docname.startswith("main_modules/")
+                     or docname.startswith("extra_modules/"))
+            and (_LOCAL_CLASS_URL or _LOCAL_TYPEDEF_URL)):
+        def _token_url(tok: str) -> str | None:
+            # Tokens absent from the tagfile stay plain.
+            return _LOCAL_CLASS_URL.get(tok) or _LOCAL_TYPEDEF_URL.get(tok)
+        # Match an optional `cv::` prefix so the anchor spans `cv::Name`.
+        _tok_re = re.compile(r"(?:cv::)?_?[A-Za-z][A-Za-z0-9_]*")
+        def _bare(tok: str) -> str:
+            return tok[4:] if tok.startswith("cv::") else tok
+        def _anchor_text(tok: str) -> str:
+            # Encode `::` so the later cv-linkifier doesn't nest a second anchor.
+            return tok.replace("::", "&#58;&#58;")
+        def _linkify_html_segment(seg: str) -> str:
+            def _sub(m: re.Match) -> str:
+                url = _token_url(_bare(m.group(0)))
+                if not url:
                     return m.group(0)
-                from html import escape as _esc
-                parts, last = [], 0
-                for s, e, tok in hits:
-                    parts.append(_esc(content[last:s]))
-                    parts.append(f'<a class="reference internal" '
-                                 f'href="{_token_url(_bare(tok))}">'
-                                 f'{_anchor_text(tok)}</a>')
-                    last = e
-                parts.append(_esc(content[last:]))
-                return (f'<code class="docutils literal notranslate">'
-                        f'{"".join(parts)}</code>')
-            # Mask markdown links first (interior backticks confuse codespan pairing).
-            _masked: list[str] = []
-            def _mask(m: re.Match) -> str:
-                _masked.append(m.group(0))
-                return f"\x00MDLINK{len(_masked)-1}\x00"
-            text = re.sub(r"\[`[^`\n]+`\]\([^)\n]+\)", _mask, text)
-            text = re.sub(r"`(?P<content>[^`\n]+?)`",
-                          _linkify_markdown_codespan, text)
-            text = re.sub(r"\x00MDLINK(\d+)\x00",
-                          lambda m: _masked[int(m.group(1))], text)
+                return (f'<a class="reference internal" '
+                        f'href="{url}">{_anchor_text(m.group(0))}</a>')
+            return _tok_re.sub(_sub, seg)
+        def _linkify_inside_code(m: re.Match) -> str:
+            inner = m.group("inner")
+            out, i, n = [], 0, len(m.group("inner"))
+            while i < n:
+                if inner.startswith("<a ", i):
+                    j = inner.find("</a>", i)
+                    if j < 0:
+                        out.append(inner[i:]); break
+                    out.append(inner[i:j + 4]); i = j + 4
+                else:
+                    k = inner.find("<a ", i)
+                    if k < 0:
+                        out.append(_linkify_html_segment(inner[i:])); break
+                    out.append(_linkify_html_segment(inner[i:k])); i = k
+            return m.group("open") + "".join(out) + m.group("close")
+        text = re.sub(
+            r'(?P<open><code class="docutils literal notranslate">)'
+            r'(?P<inner>.*?)(?P<close></code>)',
+            _linkify_inside_code, text, flags=re.DOTALL)
+
+        def _linkify_markdown_codespan(m: re.Match) -> str:
+            content = m.group("content")
+            # Prefix-aware: `cv::Name` is one hit so the anchor covers both.
+            hits = [(t.start(), t.end(), t.group(0)) for t in
+                    _tok_re.finditer(content)
+                    if _token_url(_bare(t.group(0)))]
+            if not hits:
+                return m.group(0)
+            from html import escape as _esc
+            parts, last = [], 0
+            for s, e, tok in hits:
+                parts.append(_esc(content[last:s]))
+                parts.append(f'<a class="reference internal" '
+                             f'href="{_token_url(_bare(tok))}">'
+                             f'{_anchor_text(tok)}</a>')
+                last = e
+            parts.append(_esc(content[last:]))
+            return (f'<code class="docutils literal notranslate">'
+                    f'{"".join(parts)}</code>')
+        # Mask markdown links first (interior backticks confuse codespan pairing).
+        # The `(?:…|<br>)+` form also covers multi-line signature links whose
+        # text is several code spans joined by `<br>`, so their inner type
+        # tokens aren't linkified into anchors nested in the outer link.
+        _masked: list[str] = []
+        def _mask(m: re.Match) -> str:
+            _masked.append(m.group(0))
+            return f"\x00MDLINK{len(_masked)-1}\x00"
+        text = re.sub(r"\[(?:`[^`\n]+`|<br>)+\]\([^)\n]+\)", _mask, text)
+        text = re.sub(r"`(?P<content>[^`\n]+?)`",
+                      _linkify_markdown_codespan, text)
+        text = re.sub(r"\x00MDLINK(\d+)\x00",
+                      lambda m: _masked[int(m.group(1))], text)
 
     # 6c. Bullet lists of @subpage/@ref -> toctree + visible list. Runs BEFORE step 7.
     def _subpage_list_to_toctree(src: str) -> str:
@@ -693,27 +697,7 @@ def _translate(text: str, docname: str | None = None) -> str:
         ),
         text, flags=re.MULTILINE)
 
-    # 8c. @note / @see / @warning -> MyST admonitions.
-    _ADMON_KIND = {"note": "note", "see": "seealso", "warning": "warning"}
-    def _admon_repl(m: re.Match) -> str:
-        kind = _ADMON_KIND[m.group("dir")]
-        indent = m.group("indent") or ""
-        body = m.group("body").rstrip()
-        # Re-indent body lines so MyST recognizes the nested block.
-        if indent:
-            re_indented = []
-            for line in body.split("\n"):
-                if not line.strip() or line.startswith(indent):
-                    re_indented.append(line)
-                else:
-                    re_indented.append(indent + line.lstrip(" \t"))
-            body = "\n".join(re_indented)
-        return f"\n{indent}:::{{{kind}}}\n{body}\n{indent}:::\n"
-    # `:?` also accepts the `@note: text` form.
-    text = re.sub(
-        r"^(?P<indent>[ \t]*)@(?P<dir>note|see|warning):?[ \t]*\n?"
-        r"(?P<body>.+?)(?=\n[ \t]*\n|\n[ \t]*@[A-Za-z]|\Z)",
-        _admon_repl, text, flags=re.DOTALL | re.MULTILINE)
+    # 8c. @note / @see / @warning handled at step 1b above.
 
     # 8d. Dedent indented descriptions after `- @subpage X`.
     def _dedent_subpage_descriptions(src: str) -> str:
@@ -1039,7 +1023,7 @@ def _referenced_docs() -> set[str]:
     return _referenced_docs_cache
 
 
-# Tutorial roots in the @subpage/@ref nav graph (api/ wired via explicit toctrees).
+# Tutorial roots in the @subpage/@ref nav graph (API stubs wired via explicit toctrees).
 _TUTORIAL_PREFIXES = ("tutorials/", "js_tutorials/",
                       "py_tutorials/", "tutorials_contrib/")
 
@@ -1050,7 +1034,8 @@ def _source_read(app, docname, source):
             or docname.startswith("js_tutorials/")
             or docname.startswith("py_tutorials/")
             or docname.startswith("tutorials_contrib/")
-            or docname.startswith("api/")
+            or docname.startswith("main_modules/")
+            or docname.startswith("extra_modules/")
             or docname == "faq"
             or docname == "citelist"
             or docname == "intro"

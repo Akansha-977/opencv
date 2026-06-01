@@ -50,16 +50,21 @@ CONTRIB_MODULES = ([m.strip() for m in _contrib_env.split(",") if m.strip()]
 
 # SCOPE — env OPENCV_API_MODULES (comma/semicolon); empty disables API pages
 def _discover_api_modules() -> list[str]:
-    """Every main module whose umbrella header declares `@defgroup`."""
+    """Main + contrib modules whose umbrella header declares `@defgroup`."""
     found = []
-    for _hdr in (OPENCV_ROOT / "modules").glob("*/include/opencv2/*.hpp"):
-        if _hdr.stem != _hdr.parents[2].name:   # only the umbrella header
-            continue
-        try:
-            if "@defgroup" in _hdr.read_text(encoding="utf-8", errors="ignore"):
-                found.append(_hdr.stem)
-        except OSError:
-            pass
+    # Scan both the main tree and opencv_contrib/modules.
+    _roots = [OPENCV_ROOT / "modules"]
+    if CONTRIB_ROOT.is_dir():
+        _roots.append(CONTRIB_ROOT)
+    for _root in _roots:
+        for _hdr in _root.glob("*/include/opencv2/*.hpp"):
+            if _hdr.stem != _hdr.parents[2].name:   # only the umbrella header
+                continue
+            try:
+                if "@defgroup" in _hdr.read_text(encoding="utf-8", errors="ignore"):
+                    found.append(_hdr.stem)
+            except OSError:
+                pass
     return sorted(found)
 
 
@@ -91,6 +96,20 @@ _API_XML_DIR = pathlib.Path(
 ).resolve()
 # Patched namespace XML for breathe; see _patch_namespace_xml_for_breathe
 _PATCHED_XML_DIR = _API_XML_DIR.parent / "xml_for_sphinx"
+
+
+def _module_group_stem(m: str) -> str:
+    # Doxygen names a group after its @defgroup, which can differ from the
+    # module folder (folder `3d` -> `@defgroup _3d`). Return that real stem.
+    if (_API_XML_DIR / f"group__{m.replace('_', '__')}.xml").is_file():
+        return m
+    for _root in (OPENCV_ROOT / "modules", CONTRIB_ROOT):
+        _hdr = _root / m / "include" / "opencv2" / f"{m}.hpp"
+        if _hdr.is_file():
+            _mm = re.search(r"@defgroup\s+(\S+)",
+                            _hdr.read_text(encoding="utf-8", errors="ignore"))
+            return _mm.group(1) if _mm else m
+    return m
 
 # -- Python enum/constant signatures ----------------------------------------
 # C++ enumerator FQN -> cv2.* name; env OPENCV_PYTHON_SIGNATURES_FILE
@@ -164,13 +183,25 @@ _TAG_FILE = pathlib.Path(_os.environ.get(
 _TAG_FILENAMES: dict[str, str] = {}
 # anchor -> title
 _TAG_TITLES: dict[str, str] = {}
+# Page-only subset of _TAG_TITLES (kind="page" compounds only — NOT groups/files),
+# i.e. Doxygen's "Related Pages" set: \page docs like intro, faq, cuda_intro, …
+_DOC_PAGE_TITLES: dict[str, str] = {}
+# (compound-stem, member-name, normalized-args) -> Doxygen HTML anchor.
+# Bridges our XML-driven members to the HTML anchors that name the call/caller
+# graph SVGs (XML memberdef ids and HTML anchors live in disjoint hash spaces).
+_CALL_GRAPH_ANCHORS: dict[tuple[str, str, str], str] = {}
+# Doxygen member anchor -> Sphinx anchor (lowercased member name). Lets diagram
+# cross-links jump to the exact member, as the original Doxygen pages did.
+_DOXY_ANCHOR_TO_MEMBER: dict[str, str] = {}
+
+
+def _norm_args(arglist: str) -> str:
+    """Normalize a C++ arg-list so an XML `argsstring` matches a tag `arglist`."""
+    import html as _html
+    return re.sub(r"\s+", "", _html.unescape(arglist or ""))
 # cv-namespace short-name -> doxygen URL; used by step 7c
 _CV_SYMBOL_URL: dict[str, str] = {}
-# include-path (e.g. 'opencv2/core/mat.hpp') -> hash-prefixed Doxygen
-# HTML basename (e.g. 'dc/dc2/mat_8hpp.html'). Populated from the
-# tagfile's `<compound kind="file">` entries; used by the enum detail
-# block emitter to linkify the `<…>` portion of the `#include` line so
-# it matches the live OpenCV page's clickable file path.
+# include-path -> Doxygen HTML file URL; linkifies enum `#include` lines.
 _FILE_URL: dict[str, str] = {}
 if _TAG_FILE.is_file():
     try:
@@ -178,6 +209,21 @@ if _TAG_FILE.is_file():
         _tag_root = _ET.parse(str(_TAG_FILE)).getroot()
         for _c in _tag_root.iter("compound"):
             _kind = _c.get("kind")
+            # Call/caller-graph anchors: every compound's function members,
+            # keyed by the page they're documented on (the SVG filename prefix).
+            for _fm in _c.findall("member"):
+                if _fm.get("kind") != "function":
+                    continue
+                _fn = _fm.findtext("name")
+                _faf = _fm.findtext("anchorfile") or ""
+                _fan = _fm.findtext("anchor") or ""
+                if not (_fn and _faf and _fan):
+                    continue
+                _fstem = pathlib.Path(_faf).stem
+                _CALL_GRAPH_ANCHORS.setdefault(
+                    (_fstem, _fn, _norm_args(_fm.findtext("arglist") or "")), _fan)
+                # Doxygen anchor -> Sphinx member anchor (lowercased name).
+                _DOXY_ANCHOR_TO_MEMBER.setdefault(_fan, _fn.lower())
             if _kind == "page":
                 _n, _f = _c.findtext("name"), _c.findtext("filename")
                 _t = _c.findtext("title")
@@ -185,6 +231,7 @@ if _TAG_FILE.is_file():
                     _TAG_FILENAMES[_n] = _f if _f.endswith(".html") else _f + ".html"
                 if _n and _t:
                     _TAG_TITLES[_n] = _t
+                    _DOC_PAGE_TITLES[_n] = _t
             elif _kind == "namespace" and _c.findtext("name") == "cv":
                 for _m in _c.findall("member"):
                     _n = _m.findtext("name")
@@ -212,10 +259,7 @@ if _TAG_FILE.is_file():
                 if _n and _t:
                     _TAG_TITLES[_n] = _t
             elif _kind == "file":
-                # `path` is relative (e.g. 'opencv2/core/') for header
-                # files indexed via INCLUDE_PATH; concatenate to form
-                # the canonical include key that matches what
-                # memberdef <location file="…"> reports.
+                # Header file -> Doxygen page; key by include path.
                 _n = _c.findtext("name") or ""
                 _p = _c.findtext("path") or ""
                 _f = _c.findtext("filename") or ""
@@ -300,19 +344,32 @@ _LOCAL_CLASS_URL: dict[str, str] = {
     # _Tp template-parameter placeholder stub
     "_Tp": "class_Tp.html",
 }
-_LOCAL_TYPEDEF_URL: dict[str, str] = {}  # 'uchar' -> 'core_hal_interface.html#uchar'
+_LOCAL_TYPEDEF_URL: dict[str, str] = {}  # 'uchar' -> 'core_hal_interface.html#_CPPv45uchar'
+# Doxygen template-param placeholder pages -> (display name, Sphinx page).
+# Sphinx mirrors these as stubs (stubs._write_placeholder_stubs) so diagram
+# cross-links resolve instead of 404ing.
+_PLACEHOLDER_STUBS: dict[str, tuple[str, str]] = {
+    "class__Tp.html":        ("_Tp",        "class_Tp.html"),
+    "classfloat__type.html": ("float_type", "classfloat_type.html"),
+}
+# Doxygen compound filename -> Sphinx page filename (class/struct compounds).
+_LOCAL_PAGE_BY_DOXY_FILE: dict[str, str] = {
+    _doxy: _page for _doxy, (_disp, _page) in _PLACEHOLDER_STUBS.items()}
 if _LOCAL_SRC_TAG.is_file():
     try:
         import xml.etree.ElementTree as _ET
         for _c in _ET.parse(str(_LOCAL_SRC_TAG)).getroot().iter("compound"):
-            if _c.get("kind") == "class":
+            if _c.get("kind") in ("class", "struct"):
                 _n = _c.findtext("name") or ""
                 _f = _c.findtext("filename") or ""
                 if _n and _f:
                     _short = _n.split("::")[-1]
                     _fn = _f if _f.endswith(".html") else _f + ".html"
-                    _LOCAL_CLASS_URL.setdefault(
-                        _short, pathlib.PurePosixPath(_fn).name)
+                    _doxy_base = pathlib.PurePosixPath(_fn).name
+                    _LOCAL_CLASS_URL.setdefault(_short, _doxy_base)
+                    # Sphinx mirrors Doxygen's filename except the few remapped.
+                    _LOCAL_PAGE_BY_DOXY_FILE.setdefault(
+                        _doxy_base, _LOCAL_CLASS_URL.get(_short, _doxy_base))
             for _mem in _c.findall("member"):
                 # variable only from namespaces; class-member vars poison the map
                 _mk = _mem.get("kind")
@@ -353,6 +410,21 @@ if _LOCAL_SRC_TAG.is_file():
                 _LOCAL_TYPEDEF_URL[_mn] = f"{_local_page}#{_anchor}"
     except Exception:
         pass
+
+
+def _doxy_page_to_local(basename: str) -> str:
+    """Map a Doxygen compound page filename to the Sphinx page for the same
+    symbol. Pure name transform — the caller verifies the file exists.
+        group__core__utils.html -> core_utils.html
+        namespacecv*.html       -> core_basic.html
+        class*/struct*/union*   -> unchanged (or remapped, e.g. the _Tp stub)
+    """
+    if basename.startswith("group__"):
+        return (basename[len("group__"):].replace(".html", "")
+                .replace("__", "_") + ".html")
+    if basename.startswith("namespace"):
+        return "core_basic.html"
+    return _LOCAL_PAGE_BY_DOXY_FILE.get(basename, basename)
 
 
 # -- Class template-parameter display map (step 8e) -------------------------
@@ -808,15 +880,16 @@ __all__ = [
     "HERE", "DOC_ROOT", "OPENCV_ROOT",
     "DOC_MODULES", "JS_DOC_MODULES", "PY_DOC_MODULES",
     "CONTRIB_MODULES", "CONTRIB_ROOT", "SPHINX_INPUT_ROOT", "API_MODULES",
-    "_API_XML_DIR", "_PATCHED_XML_DIR",
+    "_API_XML_DIR", "_PATCHED_XML_DIR", "_module_group_stem",
     "_PY_SIGNATURES", "_python_enum_name",
     "HAVE_SPHINX_DESIGN", "HAVE_BREATHE",
     "DOXYGEN_BASE_URL", "_doxygen_url",
-    "_TAG_FILE", "_TAG_FILENAMES", "_TAG_TITLES", "_CV_SYMBOL_URL",
-    "_FILE_URL",
+    "_TAG_FILE", "_TAG_FILENAMES", "_TAG_TITLES", "_DOC_PAGE_TITLES",
+    "_CV_SYMBOL_URL", "_FILE_URL",
+    "_CALL_GRAPH_ANCHORS", "_DOXY_ANCHOR_TO_MEMBER", "_norm_args",
     "_LIVE_GROUP_URL", "_LIVE_CLASS_URL", "_LIVE_TYPEDEF_URL",
     "_LOCAL_CLASS_URL", "_LOCAL_TYPEDEF_URL", "_CLASS_TEMPLATE_DISPLAY",
-    "_CLASSES_WITH_DETAIL",
+    "_LOCAL_PAGE_BY_DOXY_FILE", "_PLACEHOLDER_STUBS", "_doxy_page_to_local",
     "_func_slug",
     "_CITE_NUMBER", "_BIB_ENTRIES_SORTED", "_bib_render_all",
     "_REDIRECT_MAP", "_resolve_redirect",

@@ -148,14 +148,19 @@ set(_LEGACY_DOXYFILE "${CMAKE_BINARY_DIR}/doc/Doxyfile")
 set(_DOXYGEN_XML_DIR "${CMAKE_BINARY_DIR}/doc/doxygen/xml")
 
 # Modules to process with Doxygen — must match OPENCV_API_MODULES used at
-# sphinx-build time. Default = every main module whose umbrella header
-# (modules/<m>/include/opencv2/<m>.hpp) declares `@defgroup`, discovered the
+# sphinx-build time. Default = every main AND contrib module whose umbrella
+# header (<m>/include/opencv2/<m>.hpp) declares `@defgroup`, discovered the
 # same way conf.py's _discover_api_modules() does so the two stay in sync and
 # new modules are picked up automatically.
 # Override: cmake -DSPHINX_API_MODULES="core;photo;imgproc;objdetect;3d"
 if(NOT DEFINED SPHINX_API_MODULES)
   set(SPHINX_API_MODULES "")
   file(GLOB _umbrella_headers "${CMAKE_SOURCE_DIR}/modules/*/include/opencv2/*.hpp")
+  # Also scan opencv_contrib modules when present.
+  if(OPENCV_EXTRA_MODULES_PATH AND EXISTS "${OPENCV_EXTRA_MODULES_PATH}")
+    file(GLOB _contrib_umbrellas "${OPENCV_EXTRA_MODULES_PATH}/*/include/opencv2/*.hpp")
+    list(APPEND _umbrella_headers ${_contrib_umbrellas})
+  endif()
   foreach(_hdr ${_umbrella_headers})
     get_filename_component(_stem "${_hdr}" NAME_WE)
     # Only the umbrella header modules/<m>/include/opencv2/<m>.hpp.
@@ -210,6 +215,13 @@ if(EXISTS "${_LEGACY_DOXYFILE}")
     # the parser (the reason expansion was previously disabled wholesale).
     "MACRO_EXPANSION = YES\n"
     "EXPAND_ONLY_PREDEF = YES\n"
+    # Strip CUDA execution-space / inline qualifiers that the cudev module leaves
+    # on every function (e.g. `__device__ __forceinline__ schar abs_(schar)`).
+    # nvcc keywords, not C++: left in, they pollute signatures and break the
+    # Sphinx C++ parser, so breathe dumps the parse error into a Warning box.
+    # Mapping them to nothing here (like the CV_* macros above) yields clean,
+    # parseable declarations. `+=` appends to the @INCLUDE'd PREDEFINED list.
+    "PREDEFINED += __device__= __host__= __forceinline__= __global__= __constant__= __shared__= __restrict__=\n"
   )
   find_program(DOXYGEN_EXE NAMES doxygen)
   if(DOXYGEN_EXE)
