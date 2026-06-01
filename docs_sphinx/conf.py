@@ -74,7 +74,8 @@ master_doc = "index" if USE_INDEX_LANDING else "tutorials/tutorials"
 include_patterns = (["index.markdown"] if USE_INDEX_LANDING else []) + [
                     "tutorials/tutorials.markdown", "faq.markdown",
                     "citelist.markdown", "intro.markdown",
-                    "related_pages.markdown"] + [
+                    "related_pages.markdown", "namespace_list.markdown",
+                    "class_list.markdown"] + [
     f"tutorials/{m}/**" for m in DOC_MODULES
 ] + (["js_tutorials/js_tutorials.markdown"] if JS_DOC_MODULES else []) + [
     f"js_tutorials/{m}/**" for m in JS_DOC_MODULES
@@ -153,7 +154,7 @@ html_css_files = [
 html_theme_options = {
     "logo": {"text": f"OpenCV {release}"},
     # Show all nav links inline (no "More" dropdown).
-    "header_links_before_dropdown": 7,
+    "header_links_before_dropdown": 6,
     # Header nav. Uses the theme's `external_links` slot as the data hook, but
     # navbar-nav.html resolves every entry ON-SITE against the Sphinx tree:
     #   * `docname` entries -> depth-correct relative link via `pathto`
@@ -162,16 +163,15 @@ html_theme_options = {
     #     (javadoc has no Sphinx equivalent).
     # The tutorial module tree stays in the left sidebar, not the header.
     # Mirrors the legacy Doxygen header layout, but every entry resolves to a
-    # LOCAL Sphinx page (Namespaces/Classes/Files share the api_root browser —
-    # the Sphinx site has no separate symbol/file listings). Related Pages and
-    # Examples are generated indexes (conf_helpers/build.py). Java docs are the
-    # one genuinely off-site target (no local javadoc), so kept `external`.
+    # LOCAL Sphinx page. Related Pages / Namespaces / Classes / Examples are all
+    # generated index pages (conf_helpers/build.py). Java docs are the one
+    # genuinely off-site target (no local javadoc), so kept `external`.
+    # (Files is dropped — the Sphinx site has no per-file listing.)
     "external_links": [
         {"docname": master_doc,                "name": "Main Page"},
         {"docname": "related_pages",           "name": "Related Pages"},
-        {"docname": "main_modules/api_root",   "name": "Namespaces"},
-        {"docname": "main_modules/api_root",   "name": "Classes"},
-        {"docname": "main_modules/api_root",   "name": "Files"},
+        {"docname": "namespace_list",          "name": "Namespaces"},
+        {"docname": "class_list",              "name": "Classes"},
         {"docname": "examples/examples_root",  "name": "Examples"},
         {"url": DOXYGEN_BASE_URL + "javadoc/", "name": "Java documentation",
          "external": True},

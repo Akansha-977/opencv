@@ -1425,12 +1425,25 @@ def _generate_api_stubs(modules, xml_dir, out_dir,
                     _write_namespace_stub(ns, out_dir, xml_dir,
                                           global_ns_group_map, global_group_info)
                     written_ns.add(ns["name"])
+                    _ALL_NAMESPACES[ns["name"]] = {
+                        "refid": ns.get("refid", ""),
+                        "brief": ns.get("brief", ""),
+                        "docname": f"{_doc_prefix}/namespace_"
+                                   f"{ns['name'].replace('::', '__')}",
+                    }
                 ns_map.setdefault(group_name, []).append((ns["name"], anchor))
         _write_api_stub(tree, out_dir, classes_seen, ns_map)
     # Per-class pages; seed `_ANCHOR_TO_DOC` refid→docname for `@ref`.
     for cls in classes_seen.values():
         _write_class_stub(cls, out_dir, xml_dir)
-        _ANCHOR_TO_DOC[cls["refid"]] = f"{_doc_prefix}/{_class_page_name(cls['refid'])}"
+        _docname = f"{_doc_prefix}/{_class_page_name(cls['refid'])}"
+        _ANCHOR_TO_DOC[cls["refid"]] = _docname
+        _ALL_CLASSES[cls["refid"]] = {
+            "qualified": cls.get("qualified") or cls.get("name", ""),
+            "kind": cls.get("kind", "class"),
+            "brief": cls.get("brief", ""),
+            "docname": _docname,
+        }
     # Placeholder stubs for bare template params (_Tp, …) so diagram links resolve.
     _write_placeholder_stubs(out_dir, xml_dir)
     # Hidden toctree drives nav/sidebar; the visible list shows "folder. Title".

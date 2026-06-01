@@ -840,6 +840,13 @@ def _scan_external(toc_file: pathlib.Path) -> None:
 _IMAGE_INDEX: dict[str, str] = {}
 _SNIPPET_INDEX: dict[str, pathlib.Path] = {}
 
+# API inventories for the aggregate "Class List" / "Namespace List" header
+# pages. Populated by stubs.py as it writes the per-class / per-namespace pages
+# (across both the main and contrib stub passes); read by build.py to render
+# the two index pages with local links + brief descriptions.
+_ALL_CLASSES: dict[str, dict] = {}      # refid -> {qualified, kind, brief, docname}
+_ALL_NAMESPACES: dict[str, dict] = {}   # name  -> {refid, brief, docname}
+
 _TOGGLE_LABELS = {"cpp": "C++", "java": "Java", "python": "Python"}
 
 
@@ -897,5 +904,6 @@ __all__ = [
     "_REFERENCED_ANCHORS", "_HEAD_RE",
     "_scan_internal", "_scan_external",
     "_IMAGE_INDEX", "_SNIPPET_INDEX", "_SNIPPET_BASES",
+    "_ALL_CLASSES", "_ALL_NAMESPACES",
     "_TOGGLE_LABELS", "_LANG_ALIASES",
 ]

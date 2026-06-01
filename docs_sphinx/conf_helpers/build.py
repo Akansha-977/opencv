@@ -277,10 +277,115 @@ def _write_examples_index() -> None:
         pass
 
 
+def _esc(s: str) -> str:
+    """Minimal HTML escape for brief text injected into the index <li> markup."""
+    return (s or "").replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;")
+
+
+def _write_namespace_list_index() -> None:
+    """Generate `namespace_list.markdown` — local analog of Doxygen's
+    namespaces.html (the header "Namespaces" target).
+
+    Renders the namespace tree (cv → cv::cuda → …) as a nested list, each node
+    linking to its local namespace page with the brief description alongside.
+    Intermediate namespaces with no page of their own render as plain text.
+    Sourced from `_ALL_NAMESPACES` (populated during API-stub generation).
+    """
+    if SPHINX_INPUT_ROOT == DOC_ROOT or not _ALL_NAMESPACES:
+        return
+    # Nested tree keyed by path component; each node tracks its full name.
+    tree: dict = {}
+    for _name in _ALL_NAMESPACES:
+        node = tree
+        parts = _name.split("::")
+        for _i, _part in enumerate(parts):
+            node = node.setdefault(
+                _part, {"_full": "::".join(parts[:_i + 1]), "_kids": {}})["_kids"]
+
+    def render(node: dict) -> list[str]:
+        out = ["<ul>"]
+        for _part in sorted(node, key=str.lower):
+            child = node[_part]
+            info = _ALL_NAMESPACES.get(child["_full"])
+            if info:
+                label = f'<a href="{info["docname"]}.html">{_part}</a>'
+                if info.get("brief"):
+                    label += f' — {_esc(info["brief"])}'
+            else:
+                label = _part
+            out.append(f"<li>{label}")
+            if child["_kids"]:
+                out += render(child["_kids"])
+            out.append("</li>")
+        out.append("</ul>")
+        return out
+
+    text = (
+        "---\norphan: true\n---\n"
+        "# Namespace List\n\n"
+        "Here is a list of all documented namespaces with brief descriptions.\n\n"
+        f'<div class="ocv-namespace-list">\n{chr(10).join(render(tree))}\n</div>\n'
+    )
+    try:
+        (SPHINX_INPUT_ROOT / "namespace_list.markdown").write_text(
+            text, encoding="utf-8")
+    except OSError:
+        pass
+
+
+def _write_class_list_index() -> None:
+    """Generate `class_list.markdown` — local analog of Doxygen's annotated.html
+    (the header "Classes" target).
+
+    Lists every documented class/struct grouped by its enclosing namespace,
+    each linking to its local page with the brief description. Sourced from
+    `_ALL_CLASSES` (populated during API-stub generation).
+    """
+    if SPHINX_INPUT_ROOT == DOC_ROOT or not _ALL_CLASSES:
+        return
+    by_ns: dict[str, list[tuple[str, dict]]] = {}
+    for _info in _ALL_CLASSES.values():
+        qualified = _info.get("qualified", "")
+        if not qualified:
+            continue
+        ns, _, leaf = qualified.rpartition("::")
+        by_ns.setdefault(ns, []).append((leaf, _info))
+
+    body = ['<ul class="ocv-class-list">']
+    for ns in sorted(by_ns, key=lambda n: (n == "", n.lower())):
+        heading = ns if ns else "(global namespace)"
+        ns_info = _ALL_NAMESPACES.get(ns)
+        if ns_info:
+            heading = f'<a href="{ns_info["docname"]}.html">{ns}</a>'
+        body.append(f"<li><b>{heading}</b>")
+        body.append("<ul>")
+        for leaf, info in sorted(by_ns[ns], key=lambda t: t[0].lower()):
+            entry = f'<a href="{info["docname"]}.html">{leaf}</a>'
+            if info.get("brief"):
+                entry += f' — {_esc(info["brief"])}'
+            body.append(f"<li>{entry}</li>")
+        body.append("</ul></li>")
+    body.append("</ul>")
+
+    text = (
+        "---\norphan: true\n---\n"
+        "# Class List\n\n"
+        "Here are the classes, structs and unions with brief descriptions.\n\n"
+        f'<div class="ocv-class-list-wrap">\n{chr(10).join(body)}\n</div>\n'
+    )
+    try:
+        (SPHINX_INPUT_ROOT / "class_list.markdown").write_text(
+            text, encoding="utf-8")
+    except OSError:
+        pass
+
+
 _write_root_index()
 _write_related_pages_index()
 if API_MODULES:
     _write_examples_index()
+    _write_namespace_list_index()
+    _write_class_list_index()
 
 # External scan: every OTHER main module's top-level table_of_content_*.markdown.
 # Sources live under DOC_ROOT (the staged tree only contains *enabled* main
