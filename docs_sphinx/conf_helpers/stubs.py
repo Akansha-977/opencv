@@ -434,14 +434,22 @@ def _write_api_stub(node: dict, out_dir: pathlib.Path,
         should link to. Same resolution as `_member_anchor_link`, but
         returns the bare target string instead of a wrapped markdown
         link — so the caller can put the link ONLY around the function
-        name and leave the parameter types/names as separate spans."""
+        name and leave the parameter types/names as separate spans.
+
+        For in-page anchors the refid is normalized to the form Sphinx
+        actually emits: MyST's `({refid})=` cross-ref target slugifies
+        `_+` runs to a single `-` (so e.g.
+        `group__core__array_1ga6fef…` becomes `group-core-array-1ga6fef…`).
+        Without this normalization the summary-row href stays in the
+        raw refid form and resolves to nothing on the page."""
         if _is_class_member(m):
             q = m["qualified"]
             parent_qualified = q.rsplit("::", 1)[0]
             for c in classes_seen.values():
                 if c.get("qualified") == parent_qualified:
                     return f"{_class_page_name(c['refid'])}.md"
-        return f"#{m['id']}"
+        import re as _re
+        return f"#{_re.sub(r'_+', '-', m['id'])}"
 
     def _func_row_split_md(m: dict) -> str:
         """Function summary-row Name cell as ONE continuous inline-code
@@ -584,8 +592,16 @@ def _write_api_stub(node: dict, out_dir: pathlib.Path,
                     _init = (' ' + _html_mod.escape(_v["initializer"])
                              if _v.get("initializer") else '')
                     _full = _val_prefix + _v["name"]
+                    # Per-value link target so every enumerator scrolls
+                    # to its own row in the Enumeration Type
+                    # Documentation table (`_enumerator_list_table` with
+                    # `with_anchors=True` emits the matching `<span
+                    # id="_CPPv4…">` per row). Without this every line
+                    # in the synopsis hit the same enum-level anchor.
+                    _v_href = (f"#{_sphinx_cpp_v4_id(_qual + '::' + _v['name'])}"
+                               if _qual else _href)
                     out.append(
-                        f'    <a class="reference internal" href="{_href}">'
+                        f'    <a class="reference internal" href="{_v_href}">'
                         f'<span class="n">{_safe(_full)}</span></a>'
                         f'{_init}{_comma}'
                     )
@@ -747,12 +763,26 @@ def _write_api_stub(node: dict, out_dir: pathlib.Path,
                                 f"`#include <{_einc}>`", ""]
                 if m.get("brief"):
                     blk += [m["brief"], ""]
-                if m.get("detailed"):
-                    blk += [m["detailed"], ""]
                 _vals = m.get("enum_values") or []
+                if m.get("detailed"):
+                    # Linkify enum-value-name mentions inside any
+                    # `cpp`-fenced code blocks in the detailed
+                    # description — matches the live Doxygen page where
+                    # `BORDER_CONSTANT`, `BORDER_REPLICATE`, etc. inside
+                    # the BorderTypes prose render as blue clickables.
+                    # Markdown links don't render inside ```fences```,
+                    # so we convert each fenced block to a raw `<pre>`
+                    # carrying `<a>` tags. Values not mentioned (or no
+                    # values defined) leave the block untouched.
+                    blk += [_linkify_enum_values_in_detailed(
+                                m["detailed"], _vals, _qual), ""]
                 if _vals:
                     blk += ["**Enumerator:**", ""]
-                    blk += _enumerator_list_table(_vals, _qual, _is_strong)
+                    # `with_anchors=True` adds a per-row `<span id="_CPPv4…">`
+                    # so each enumerator-name link in the summary
+                    # synopsis above resolves to its specific row.
+                    blk += _enumerator_list_table(
+                        _vals, _qual, _is_strong, with_anchors=True)
                 blocks.append(blk)
                 continue
             if kind_key == "define":
@@ -814,6 +844,43 @@ def _param_item_lines(nm: str, desc: str) -> list[str]:
     # blank lines stay empty so the nested list/paragraphs render loosely.
     out += [f"  {ln}" if ln.strip() else "" for ln in lines[1:]]
     return out
+
+
+def _linkify_enum_values_in_detailed(detailed: str, values: list[dict],
+                                     enum_qualified: str) -> str:
+    """Linkify enum-value-name mentions inside `cpp`-fenced code blocks
+    of a detailed description. Converts each ```cpp ... ``` fence to a
+    raw `<pre>` block (so MyST will render embedded `<a>` tags — they
+    wouldn't inside a markdown fence). Each known enum-value name in
+    the block becomes `<a href="#cppv4-id">NAME</a>`, pointing at the
+    row in the Enumeration Type Documentation table where that value
+    is documented (`with_anchors=True` emits the matching span id).
+    Surrounding prose, lists, and other paragraphs are untouched."""
+    if not values or not detailed:
+        return detailed
+    import re as _re
+    from html import escape as _esc
+    name_to_id = {v["name"]: _sphinx_cpp_v4_id(f"{enum_qualified}::{v['name']}")
+                  for v in values if v.get("name")}
+    if not name_to_id:
+        return detailed
+    # Longest names first so a value like `BORDER_REFLECT_101` is matched
+    # before its prefix `BORDER_REFLECT` truncates the substitution.
+    name_re = _re.compile(
+        r"\b(" + "|".join(_re.escape(n) for n in
+                          sorted(name_to_id, key=len, reverse=True)) + r")\b")
+    def _link_names(text: str) -> str:
+        def _sub(m: _re.Match) -> str:
+            n = m.group(1)
+            return f'<a class="reference internal" href="#{name_to_id[n]}">{n}</a>'
+        return name_re.sub(_sub, text)
+    # Replace each fenced cpp/text/(default) block with a raw <pre>.
+    fence_re = _re.compile(r"```[a-zA-Z]*\n(?P<body>.*?)\n```", _re.DOTALL)
+    def _fence_repl(m: _re.Match) -> str:
+        body = _esc(m.group("body"))
+        body = _link_names(body)
+        return f'<pre class="opencv-enum-detail-pre">{body}</pre>'
+    return fence_re.sub(_fence_repl, detailed)
 
 
 def _enumerator_list_table(values: list[dict], enum_qualified: str,

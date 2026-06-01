@@ -897,6 +897,7 @@ __all__ = [
     "_LIVE_GROUP_URL", "_LIVE_CLASS_URL", "_LIVE_TYPEDEF_URL",
     "_LOCAL_CLASS_URL", "_LOCAL_TYPEDEF_URL", "_CLASS_TEMPLATE_DISPLAY",
     "_LOCAL_PAGE_BY_DOXY_FILE", "_PLACEHOLDER_STUBS", "_doxy_page_to_local",
+    "_CLASSES_WITH_DETAIL",
     "_func_slug",
     "_CITE_NUMBER", "_BIB_ENTRIES_SORTED", "_bib_render_all",
     "_REDIRECT_MAP", "_resolve_redirect",

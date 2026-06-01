@@ -365,11 +365,136 @@ def _doxygen_desc_to_md(el, h_level: int = 3) -> str:
                 parts.append(child.tail)
         return "".join(parts)
 
+    # Doxygen <highlight class> → Pygments span class. Lets the existing
+    # `.highlight pre` CSS color keywords / strings / comments inside the
+    # raw-HTML `<pre>` blocks we emit below without our own stylesheet.
+    _HL_PYG_CLASS = {
+        "keyword":           "k",
+        "keywordtype":       "kt",
+        "keywordflow":       "k",
+        "preprocessor":      "cp",
+        "comment":           "c",
+        "comment-multiline": "cm",
+        "stringliteral":     "s",
+        "charliteral":       "sc",
+    }
+
+    def _local_ref_url(refid: str, name: str) -> str | None:
+        """Resolve a Doxygen `<ref refid="…">` to a LOCAL Sphinx URL.
+
+        Layered lookup:
+          1. Class/typedef short-name → curated map (`Mat`, `InputArray`, …)
+          2. Class/struct member refid (`classcv_1_1Mat_1aXXX`) → class
+             page + slugified member anchor.
+          3. Group-anchored function refid (`group__core__array_1gaXXX`) →
+             same-page slugified anchor (the function's detail block is
+             emitted by `_render_member_detail` with `({refid})=`, which
+             MyST renders as `<span id="group-core-array-1gaXXX">`).
+          4. Bare class/struct compound refid (`classcv_1_1Mat`) →
+             class page.
+        Returns None when none match — caller leaves the token plain
+        instead of emitting a broken link or an off-site URL."""
+        if not refid:
+            return None
+        direct = _LOCAL_CLASS_URL.get(name) or _LOCAL_TYPEDEF_URL.get(name)
+        if direct:
+            return direct
+        # Class/struct member: split into <page>_1<hex>.
+        m = re.match(
+            r"^((?:class|struct)cv_1_1[A-Za-z0-9_]+?)_1"
+            r"([a-z]{1,3}[0-9a-f]{20,})$", refid)
+        if m:
+            page = m.group(1)
+            slug = re.sub(r"_+", "-", refid)
+            return f"{page}.html#{slug}"
+        # Group-anchored function/member on a group page.
+        if refid.startswith("group__"):
+            return f"#{re.sub(r'_+', '-', refid)}"
+        # Bare class/struct compound (no member).
+        if refid.startswith(("classcv_1_1", "structcv_1_1")):
+            return f"{refid}.html"
+        # File refid pattern: `<basename>_8<ext>` (e.g. `core_8hpp`).
+        # Look the include-path text up in the tagfile-built `_FILE_URL`
+        # map and link to the local Doxygen file page. Without this
+        # branch the `#include "opencv2/core.hpp"` path inside example
+        # code blocks stays plain text.
+        if re.match(r"^[A-Za-z0-9_]+_8[a-z]+$", refid):
+            f = _FILE_URL.get(name)
+            if f:
+                return f"../../../doc/doxygen/html/{f}"
+        return None
+
     def _programlisting(node) -> str:
-        lines = []
+        """Emit the program-listing as a raw `<pre>` block so embedded
+        `<ref>` cross-references can render as real `<a>` tags. Each
+        `<highlight class>` carries Pygments-style coloring via the
+        class map above (so keywords/strings/comments stay colored just
+        like the live Doxygen page). Local URLs only: a `<ref>` whose
+        name isn't in `_LOCAL_CLASS_URL`/`_LOCAL_TYPEDEF_URL` stays
+        plain text — we never bounce readers to docs.opencv.org."""
+        from html import escape as _esc
+        out = ['<div class="highlight-cpp notranslate"><div class="highlight"><pre>']
         for codeline in node.findall("codeline"):
-            lines.append("".join(_hl_text(hl) for hl in codeline.findall("highlight")))
-        return "```cpp\n" + "\n".join(lines) + "\n```"
+            line: list[str] = []
+            for hl in codeline.findall("highlight"):
+                pyg = _HL_PYG_CLASS.get(hl.get("class", ""), "")
+                segs: list[str] = []
+                if hl.text:
+                    segs.append(_esc(hl.text))
+                for child in hl:
+                    if child.tag == "sp":
+                        segs.append(" ")
+                    elif child.tag == "ref":
+                        nm = "".join(child.itertext())
+                        url = _local_ref_url(child.get("refid", ""), nm)
+                        if url:
+                            segs.append(
+                                f'<a class="reference internal" '
+                                f'href="{url}">{_esc(nm)}</a>')
+                        else:
+                            segs.append(_esc(nm))
+                    else:
+                        segs.append(_esc("".join(child.itertext())))
+                    if child.tail:
+                        segs.append(_esc(child.tail))
+                content = "".join(segs)
+                # Fallback: inside `preprocessor` highlights, linkify
+                # any `#include "<path>"` / `#include <<path>>` whose
+                # path is in `_FILE_URL` but whose `<ref>` element
+                # Doxygen omitted (happens for files outside this
+                # build's API_MODULES — imgproc/imgcodecs/highgui/etc.
+                # show as plain text otherwise even though their
+                # local Doxygen file pages exist).
+                if pyg == "cp":
+                    def _include_repl(m: re.Match) -> str:
+                        path = m.group("path")
+                        f = _FILE_URL.get(path)
+                        if not f or "<a " in m.group(0):
+                            return m.group(0)
+                        return (f'{m.group("pre")}<a class="reference internal" '
+                                f'href="../../../doc/doxygen/html/{f}">'
+                                f'{path}</a>{m.group("post")}')
+                    content = re.sub(
+                        r'(?P<pre>#include\s+&quot;)(?P<path>[\w./]+)(?P<post>&quot;)',
+                        _include_repl, content)
+                    content = re.sub(
+                        r'(?P<pre>#include\s+&lt;)(?P<path>[\w./]+)(?P<post>&gt;)',
+                        _include_repl, content)
+                line.append(f'<span class="{pyg}">{content}</span>' if pyg
+                            else content)
+            joined = "".join(line)
+            # Empty code lines become a `<span></span>` placeholder. A
+            # truly blank line inside our raw-HTML block would tell
+            # CommonMark's HTML-block rule (type 6, opened by `<div>`)
+            # that the block has ENDED — MyST then re-opens a new
+            # `<pre>` for the next chunk, splitting one example into
+            # multiple nested-looking code boxes. A non-whitespace
+            # placeholder (zero visible content thanks to the empty
+            # span) keeps the block alive without changing the
+            # visual line break inside `<pre>`.
+            out.append(joined if joined.strip() else "<span></span>")
+        out.append("</pre></div></div>")
+        return "\n".join(out)
 
     def _ref_link(refid: str, text: str) -> str:
         if not (refid and text):
