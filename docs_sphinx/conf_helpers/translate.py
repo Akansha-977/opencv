@@ -333,13 +333,27 @@ def _translate(text: str, docname: str | None = None) -> str:
 
 
     if docname == "api/core_basic":
-        # NOTE: the previous translator-side "Shorter aliases for the
-        # most popular specializations of Vec<T,n>" extraction lived
-        # here. It's now redundant — `_write_api_stub` (stubs.py) emits
-        # every Doxygen `@name`-grouped section as its own `## <header>`
-        # block natively, including this one. Re-extracting here
-        # produced a duplicate H2 with the same text (Sphinx
-        # disambiguated the id as `…-vec-t-n` and `id1`).
+        _vec_rows_re = re.compile(
+            r"(?:^\| `Vec<[^`]*` \| [^\n]*\n)+", re.MULTILINE)
+        _vm = _vec_rows_re.search(text)
+        if _vm:
+            _vec_rows = _vm.group(0)
+            text = text[:_vm.start()] + text[_vm.end():]
+            _shorter = (
+                "## Shorter aliases for the most popular specializations of "
+                "Vec<T,n>\n\n"
+                # Carry the `.api-typedef-table` class so the section
+                # inherits the same table styling (and the light-mode
+                # blue Type-cell anchor rule) as the main Typedefs table
+                # above.
+                "{.api-typedef-table}\n"
+                "| Type | Name | Description |\n"
+                "|---|---|---|\n"
+                + _vec_rows + "\n")
+            text = text.replace(
+                "## Typedef Documentation",
+                _shorter + "## Typedef Documentation",
+                1)
 
         # 8c. `{doxygentypedef} cv::Ptr` -> hand-rolled cpp:type (breathe skips C++11 aliases).
         text = re.sub(
