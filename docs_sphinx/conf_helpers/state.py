@@ -358,7 +358,21 @@ _LOCAL_PAGE_BY_DOXY_FILE: dict[str, str] = {
 if _LOCAL_SRC_TAG.is_file():
     try:
         import xml.etree.ElementTree as _ET
-        for _c in _ET.parse(str(_LOCAL_SRC_TAG)).getroot().iter("compound"):
+        _root = _ET.parse(str(_LOCAL_SRC_TAG)).getroot()
+        # Set of tagfile namespace names — lets us tell a sub-namespace
+        # (`cv::ocl::Context` → `Context` is a real class to link) from a
+        # nested-in-class type (`cv::SparseMat::Node`, `cv::ImageCollection
+        # ::iterator` → the short name clashes with members/typedefs on
+        # other classes, so linking it to *this* page is almost always
+        # wrong). Only top-level / sub-namespace classes feed the
+        # short-name map; nested-in-class entries stay fully-qualified-only.
+        _NS_NAMES: set[str] = set()
+        for _nc in _root.iter("compound"):
+            if _nc.get("kind") == "namespace":
+                _nn = _nc.findtext("name") or ""
+                if _nn:
+                    _NS_NAMES.add(_nn)
+        for _c in _root.iter("compound"):
             if _c.get("kind") in ("class", "struct"):
                 _n = _c.findtext("name") or ""
                 _f = _c.findtext("filename") or ""
@@ -366,7 +380,14 @@ if _LOCAL_SRC_TAG.is_file():
                     _short = _n.split("::")[-1]
                     _fn = _f if _f.endswith(".html") else _f + ".html"
                     _doxy_base = pathlib.PurePosixPath(_fn).name
-                    _LOCAL_CLASS_URL.setdefault(_short, _doxy_base)
+                    # Skip the short-name shortcut when the parent scope
+                    # is a class (not a namespace): `cv::A::B` where `A`
+                    # is a class makes `B` ambiguous with member typedefs
+                    # of unrelated classes.
+                    _parent = _n.rsplit("::", 1)[0] if "::" in _n else ""
+                    _is_nested = bool(_parent) and _parent not in _NS_NAMES
+                    if not _is_nested:
+                        _LOCAL_CLASS_URL.setdefault(_short, _doxy_base)
                     # Sphinx mirrors Doxygen's filename except the few remapped.
                     _LOCAL_PAGE_BY_DOXY_FILE.setdefault(
                         _doxy_base, _LOCAL_CLASS_URL.get(_short, _doxy_base))

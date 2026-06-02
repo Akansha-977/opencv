@@ -102,7 +102,8 @@ def _namespaces_section(entries: list) -> list[str]:
 def _write_namespace_stub(ns: dict, out_dir: pathlib.Path,
                           xml_dir: pathlib.Path,
                           ns_group_map: dict | None = None,
-                          group_info: dict | None = None) -> tuple[str, str]:
+                          group_info: dict | None = None,
+                          classes_seen: dict | None = None) -> tuple[str, str]:
     """Write namespace_<slug>.md under out_dir. Returns (anchor, fname)."""
     import xml.etree.ElementTree as _ET
     slug = ns["name"].replace("::", "__")
@@ -246,6 +247,18 @@ def _write_namespace_stub(ns: dict, out_dir: pathlib.Path,
             page = _class_page_name(ic_refid)
             short_name = ic_name[len(ns_prefix):]
             lines.append(f"| [`{ic_kind} {short_name}`]({page}.md) |")
+            # Surface orphan namespace classes (not in any group) to the
+            # caller so their stubs get written — otherwise links like
+            # `class Node` 404. Group classes are still added by
+            # `_write_api_stub`; the dedupe keys off `refid`.
+            if classes_seen is not None and ic_refid not in classes_seen:
+                classes_seen[ic_refid] = {
+                    "refid":     ic_refid,
+                    "name":      ic_name,
+                    "qualified": ic_name,
+                    "kind":      ic_kind,
+                    "brief":     ic_brief,
+                }
         lines.append("")
 
     # Member summary tables.
@@ -276,13 +289,59 @@ def _write_namespace_stub(ns: dict, out_dir: pathlib.Path,
                 lines.append("")
             continue
         elif section_title == "Enumerations":
+            # Raw-HTML synopsis (mimics Pygments cpp highlighting) so the
+            # enum type name `cv::Name` can be wrapped in an `<a>` to its
+            # home page — the plain ```cpp fence rendered through Pygments
+            # left the name as inert `<span class="n">` text. Cross-page
+            # URL comes from `_LOCAL_TYPEDEF_URL` (populated from the
+            # tagfile); falls back to the local heading slug when the
+            # enum is documented on this same namespace page.
+            import html as _html_mod_ns
+            def _safe_ns(s: str) -> str:
+                return _html_mod_ns.escape(s).replace("::", "&#58;&#58;")
             for m in items:
                 if m["brief"]:
                     lines.append(_md_escape_cell(m["brief"]))
                     lines.append("")
-                lines.append("```cpp")
-                lines.extend(_enum_synopsis_lines(m))
-                lines.append("```")
+                _qual_ns = m.get("qualified") or m["name"]
+                _is_strong_ns = bool(m.get("strong"))
+                _kw_ns = "enum class" if _is_strong_ns else "enum"
+                if _is_strong_ns:
+                    _prefix_ns = _qual_ns + "::"
+                elif "::" in _qual_ns:
+                    _prefix_ns = _qual_ns.rsplit("::", 1)[0] + "::"
+                else:
+                    _prefix_ns = ""
+                _enum_url = (
+                    _LOCAL_TYPEDEF_URL.get(m["name"])
+                    if m.get("name") else None
+                ) or (f"#{m['name'].lower()}" if m.get("name") else None)
+                _name_html_ns = (
+                    f'<a class="reference internal" href="{_enum_url}">'
+                    f'<span class="n">{_safe_ns(_qual_ns)}</span></a> '
+                    if (_qual_ns and _enum_url) else
+                    (f'<span class="n">{_safe_ns(_qual_ns)}</span> '
+                     if _qual_ns else "")
+                )
+                lines.append(
+                    '<div class="highlight-cpp notranslate">'
+                    '<div class="highlight"><pre>'
+                    f'<span class="k">{_html_mod_ns.escape(_kw_ns)}</span> '
+                    f'{_name_html_ns}<span class="p">{{</span>'
+                )
+                _vals_ns = m.get("enum_values") or []
+                for _i, _v in enumerate(_vals_ns):
+                    _comma_ns = ('<span class="p">,</span>'
+                                 if _i < len(_vals_ns) - 1 else '')
+                    _init_ns = (' ' + _html_mod_ns.escape(_v["initializer"])
+                                if _v.get("initializer") else '')
+                    _full_ns = _prefix_ns + _v["name"]
+                    lines.append(
+                        f'    <span class="n">{_safe_ns(_full_ns)}</span>'
+                        f'{_init_ns}{_comma_ns}'
+                    )
+                lines.append('<span class="p">}</span></pre></div></div>')
+                # Blank line closes the raw-HTML block (CommonMark rule 7).
                 lines.append("")
             continue
         else:
@@ -1304,8 +1363,18 @@ def _write_class_stub(cls: dict, out_dir: pathlib.Path,
                 f'<h3 class="opencv-enum-heading" id="{enum_id}">'
                 f'enum <span class="opencv-enum-name">{_html.escape(enum_short)}</span></h3>'
             )
+            # Blank line breaks the raw-HTML block (CommonMark type 6
+            # continues until an empty line). Without it the following
+            # ```` ```{list-table} ```` directive — and every `({refid})=`
+            # anchor in the rest of the class page — is swallowed into
+            # the raw-HTML block, so member-detail anchors like
+            # `#classcv_1_1Matx_1a7fbd58…` never exist as targets and the
+            # summary-table links to `Matx::reshape` / `Matx::convertTo`
+            # land on the top of the class page instead of the function.
+            lines.append("")
             if m["brief"]:
                 lines.append(f"<p>{_html.escape(_md_escape_cell(m['brief']))}</p>")
+                lines.append("")
             # `{list-table}` (with per-value `<span id>` anchors) so each
             # enumerator's description keeps block content — @note admonitions,
             # lists, links — instead of being flattened into a raw-HTML `<dd>`.
@@ -1490,7 +1559,8 @@ def _generate_api_stubs(modules, xml_dir, out_dir,
                 anchor = f"api_ns_{ns['name'].replace('::', '__')}"
                 if ns["name"] not in written_ns:
                     _write_namespace_stub(ns, out_dir, xml_dir,
-                                          global_ns_group_map, global_group_info)
+                                          global_ns_group_map, global_group_info,
+                                          classes_seen=classes_seen)
                     written_ns.add(ns["name"])
                     _ALL_NAMESPACES[ns["name"]] = {
                         "refid": ns.get("refid", ""),
@@ -1500,6 +1570,63 @@ def _generate_api_stubs(modules, xml_dir, out_dir,
                     }
                 ns_map.setdefault(group_name, []).append((ns["name"], anchor))
         _write_api_stub(tree, out_dir, classes_seen, ns_map)
+    # Expand to cover sub-namespaces not directly attached to a group
+    # (e.g. `cv::utils` is parent-only — only `cv::utils::fs` is in a
+    # group). Without this, links like `cv::utils::lock_guard` 404
+    # because no `namespace_cv__utils.md` stub exists.
+    import xml.etree.ElementTree as _ET_ns
+    _pending_ns = list(written_ns)
+    while _pending_ns:
+        _next_ns: list[str] = []
+        for _nsn in _pending_ns:
+            _ns_refid = _ALL_NAMESPACES.get(_nsn, {}).get("refid", "")
+            if not _ns_refid:
+                continue
+            _ns_xml = xml_dir / f"{_ns_refid}.xml"
+            if not _ns_xml.is_file():
+                continue
+            try:
+                _ns_cd = _ET_ns.parse(_ns_xml).getroot().find("compounddef")
+            except _ET_ns.ParseError:
+                continue
+            if _ns_cd is None:
+                continue
+            for _inn in _ns_cd.findall("innernamespace"):
+                _iname = (_inn.text or "").strip()
+                _irefid = _inn.get("refid", "")
+                if not _iname or _iname in written_ns:
+                    continue
+                _sub_ns = {
+                    "name":  _iname,
+                    "refid": _irefid,
+                    "brief": "",
+                }
+                _write_namespace_stub(_sub_ns, out_dir, xml_dir,
+                                      global_ns_group_map, global_group_info,
+                                      classes_seen=classes_seen)
+                written_ns.add(_iname)
+                _ALL_NAMESPACES[_iname] = {
+                    "refid":   _irefid,
+                    "brief":   "",
+                    "docname": f"{_doc_prefix}/namespace_"
+                               f"{_iname.replace('::', '__')}",
+                }
+                _next_ns.append(_iname)
+        _pending_ns = _next_ns
+    # Expand `classes_seen` to cover public nested classes (`Parent::Child`)
+    # — they live inside the parent's XML, not in any group, so the
+    # group-walk above misses them. Without this every link to a nested
+    # class (e.g. `cv::MinProblemSolver::Function`) 404s.
+    _pending = list(classes_seen.values())
+    while _pending:
+        _next: list[dict] = []
+        for cls in _pending:
+            for nc in _class_inner_classes(cls["refid"], xml_dir):
+                if nc["refid"] in classes_seen:
+                    continue
+                classes_seen[nc["refid"]] = nc
+                _next.append(nc)
+        _pending = _next
     # Per-class pages; seed `_ANCHOR_TO_DOC` refid→docname for `@ref`.
     for cls in classes_seen.values():
         _write_class_stub(cls, out_dir, xml_dir)

@@ -118,6 +118,39 @@ def _read_class_brief(refid: str, xml_dir: pathlib.Path,
     return brief
 
 
+def _class_inner_classes(refid: str, xml_dir: pathlib.Path) -> list[dict]:
+    """Public innerclass entries of a class/struct compound — same dict shape
+    as group `innerclasses`. Lets the stub generator follow nested
+    `Parent::Child` classes (e.g. `cv::MinProblemSolver::Function`) which
+    are listed only inside the parent's XML, not in any group."""
+    import xml.etree.ElementTree as _ET
+    xml_path = xml_dir / f"{refid}.xml"
+    if not xml_path.is_file():
+        return []
+    try:
+        cd = _ET.parse(xml_path).getroot().find("compounddef")
+    except _ET.ParseError:
+        return []
+    if cd is None:
+        return []
+    out: list[dict] = []
+    for ic in cd.findall("innerclass"):
+        if ic.get("prot") != "public":
+            continue
+        ic_refid = ic.get("refid", "")
+        if not ic_refid:
+            continue
+        qualified = " ".join((ic.text or "").split())
+        out.append({
+            "refid": ic_refid,
+            "name": qualified,
+            "qualified": qualified,
+            "kind": "struct" if ic_refid.startswith("struct") else "class",
+            "brief": _read_class_brief(ic_refid, xml_dir),
+        })
+    return out
+
+
 def _member_template(md) -> str:
     """`template<...>` prefix for a memberdef."""
     tpl = md.find("templateparamlist")
@@ -407,6 +440,15 @@ def _doxygen_desc_to_md(el, h_level: int = 3) -> str:
             page = m.group(1)
             slug = re.sub(r"_+", "-", refid)
             return f"{page}.html#{slug}"
+        # Section anchor inside a class page (`classcv_1_1Parent_1Heading`):
+        # the suffix after `_1` is a heading id, not the hex-id pattern.
+        # Resolve to the parent class page + the original refid as id —
+        # that's what Sphinx emits on the heading's `<span class="target">`.
+        m2 = re.match(
+            r"^((?:class|struct)cv_1_1[A-Za-z][A-Za-z0-9]*)_1"
+            r"([A-Z][A-Za-z0-9_]*)$", refid)
+        if m2:
+            return f"{m2.group(1)}.html#{refid}"
         # Group-anchored function/member on a group page.
         if refid.startswith("group__"):
             return f"#{re.sub(r'_+', '-', refid)}"
@@ -497,14 +539,30 @@ def _doxygen_desc_to_md(el, h_level: int = 3) -> str:
         return "\n".join(out)
 
     def _ref_link(refid: str, text: str) -> str:
-        if not (refid and text):
-            return f"`{text}`" if text else ""
-        m = re.search(r'_1([a-z]{1,3}[0-9a-f]{20,})$', refid)
-        if m:
-            url = f"{DOXYGEN_BASE_URL}{refid[:m.start()]}.html#{m.group(1)}"
-        else:
-            url = f"{DOXYGEN_BASE_URL}{refid}.html"
-        return f"[`{text}`]({url})"
+        """Inline `<ref>` → plain markdown link (no backticks → no
+        `<code>` chip box) pointing at a LOCAL Sphinx anchor.
+
+        Previous behavior emitted `` [`text`](docs.opencv.org/…) `` —
+        the backticks wrapped the link text in a code chip ("box") and
+        the URL went off-site. The user's spec for cross-references is
+        "plain blue, no box, redirect locally", so we resolve via
+        `_local_ref_url` and emit `[text](url)`. When no local target
+        exists the token stays plain text (no off-site bounce)."""
+        if not text:
+            return ""
+        url = _local_ref_url(refid, text) if refid else None
+        if not url:
+            return text
+        # Cross-page class/file URLs: MyST mis-resolves `[txt](page.html)`
+        # as a pending xref (rendered with `#` prefix + `.xref.myst` class)
+        # because no `.html` extension is in `myst_url_schemes`. Emit raw
+        # HTML so Sphinx leaves the href untouched. Same-page anchors and
+        # `.md` doc-refs stay as markdown so MyST keeps theming them.
+        if url.endswith(".html") or ".html#" in url:
+            from html import escape as _esc_rl
+            return (f'<a class="reference internal" href="{url}">'
+                    f'{_esc_rl(text)}</a>')
+        return f"[{text}]({url})"
 
     _formula_md = _render_formula
 
@@ -524,6 +582,29 @@ def _doxygen_desc_to_md(el, h_level: int = 3) -> str:
             kind = sub.get("kind", "")
             admon = {"note": "note", "warning": "warning",
                      "attention": "warning", "remark": "note"}.get(kind)
+            if kind == "see":
+                # See Also: render refs as plain markdown links
+                # (no backticks → no `<code>` chip box) with LOCAL
+                # URLs only. Default `_ref_link` would emit
+                # `` [`name`](external_url) ``, giving the chip + bold
+                # styling and bouncing readers off-site.
+                parts: list[str] = []
+                for _p in sub.findall("para"):
+                    if _p.text:
+                        parts.append(_p.text)
+                    for _ch in _p:
+                        if _ch.tag == "ref":
+                            _txt = "".join(_ch.itertext())
+                            parts.append(_ref_link(
+                                _ch.get("refid", ""), _txt))
+                        else:
+                            parts.append("".join(_ch.itertext()))
+                        if _ch.tail:
+                            parts.append(_ch.tail)
+                see_body = "".join(parts).strip()
+                if see_body:
+                    result.append(f"**See also:** {see_body}")
+                return
             body = "\n\n".join(_blocks(sub, level))
             if admon:
                 result.append(f":::{{{admon}}}\n{body}\n:::")
@@ -1343,7 +1424,7 @@ def _namespace_innerclasses(ns_name: str, xml_dir: pathlib.Path) -> list[tuple]:
 __all__ = [
     "_itertext", "_type_to_md", "_doxygen_desc_to_md",
     "_enum_value_desc", "_normalize_include",
-    "_MEMBERDEF_SECTIONS", "_read_class_brief",
+    "_MEMBERDEF_SECTIONS", "_read_class_brief", "_class_inner_classes",
     "_build_api_hierarchy", "_parse_member_sections", "_md_escape_cell",
     "_MEMBER_DIRECTIVE", "_MEMBER_DETAIL_SECTION", "_sphinx_cpp_v4_id",
     "_enum_synopsis_html", "_enum_synopsis_lines", "_function_signature",

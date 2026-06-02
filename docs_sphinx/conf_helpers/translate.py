@@ -960,10 +960,16 @@ def _linkify_dox_hash_refs(src: str) -> str:
         return src
     def _repl(m: re.Match) -> str:
         name = m.group("name")
-        url = _CV_SYMBOL_URL.get(name)
-        if not url:
-            return m.group(0)
-        return f"[{name}]({url})"
+        # LOCAL targets only — `_CV_SYMBOL_URL` points at
+        # docs.opencv.org, so falling back to it bounces readers
+        # off-site for any function whose group page isn't in this
+        # build (e.g. `matchTemplate`, `filter2D` when imgproc is
+        # absent). Drop the `#` prefix and keep the bare token as
+        # plain text instead.
+        local = _LOCAL_CLASS_URL.get(name) or _LOCAL_TYPEDEF_URL.get(name)
+        if not local:
+            return name
+        return f"[{name}]({local})"
     return _apply_outside_code(
         src, lambda chunk: _DOX_HASH_REF_RE.sub(_repl, chunk))
 
