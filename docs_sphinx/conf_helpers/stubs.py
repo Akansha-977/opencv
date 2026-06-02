@@ -246,7 +246,12 @@ def _write_namespace_stub(ns: dict, out_dir: pathlib.Path,
         for ic_refid, ic_name, ic_kind, ic_brief in innerclasses:
             page = _class_page_name(ic_refid)
             short_name = ic_name[len(ns_prefix):]
-            lines.append(f"| [`{ic_kind} {short_name}`]({page}.md) |")
+            # Emit the `class`/`struct` keyword as a SEPARATE, non-
+            # clickable code chip — only the qualified short name is
+            # the link target. Mirrors the api-group Classes table
+            # post-rewrite (translate.py step 8e) so namespace-stub
+            # rows read the same way: `class` plain, name clickable.
+            lines.append(f"| `{ic_kind}` [`{short_name}`]({page}.md) |")
             # Surface orphan namespace classes (not in any group) to the
             # caller so their stubs get written — otherwise links like
             # `class Node` 404. Group classes are still added by
@@ -495,18 +500,25 @@ def _write_api_stub(node: dict, out_dir: pathlib.Path,
         link — so the caller can put the link ONLY around the function
         name and leave the parameter types/names as separate spans.
 
-        For in-page anchors the refid is normalized to the form Sphinx
-        actually emits: MyST's `({refid})=` cross-ref target slugifies
-        `_+` runs to a single `-` (so e.g.
-        `group__core__array_1ga6fef…` becomes `group-core-array-1ga6fef…`).
-        Without this normalization the summary-row href stays in the
-        raw refid form and resolves to nothing on the page."""
+        On Core-functionality pages where `_render_core_basic_func`
+        emits the function detail block, the anchor on the page is
+        `#cv-<func_slug>` (from `_func_slug(name)`), NOT the
+        slug-normalized refid `#group-core-…-1ga<hex>`. Without this
+        branch the summary-table row links to a `group-…` anchor that
+        doesn't exist on the page → click goes nowhere. Functions on
+        non-core pages still fall back to the refid-slug form (which
+        matches the MyST `({refid})=` target Sphinx emits when no
+        explicit anchor is used)."""
         if _is_class_member(m):
             q = m["qualified"]
             parent_qualified = q.rsplit("::", 1)[0]
             for c in classes_seen.values():
                 if c.get("qualified") == parent_qualified:
                     return f"{_class_page_name(c['refid'])}.md"
+        # Functions on core pages: target the `_func_slug`-based anchor
+        # that `_render_core_basic_func` actually emits.
+        if _is_core_page and m.get("kind") == "function" and m.get("name"):
+            return f"#{_func_slug(m['name'])}"
         import re as _re
         return f"#{_re.sub(r'_+', '-', m['id'])}"
 
@@ -555,7 +567,19 @@ def _write_api_stub(node: dict, out_dir: pathlib.Path,
     # list of members — used both for the standard per-kind sections and for
     # the @name-group sections appended afterwards. Returns markdown lines
     # (no `## heading`); enum output already carries its own trailing blanks.
-    _rich_return = (name == "core_basic")
+    #
+    # `_is_core_page` extends the original `core_basic`-only treatment to
+    # every Core-functionality group page (core_array, core_cluster,
+    # core_utils, …). The user's spec: "apply the same clickability +
+    # redirection rules to all other pages in core functionality" — that
+    # means the clickable HTML enum synopsis, the "More..." link from
+    # summary to detail, the per-page hand-rolled function detail blocks,
+    # the rich return-type cell, and the per-enum detail section all flip
+    # on together for every `core_*` group. Any page whose group name
+    # starts with `core` qualifies (top-level group is "core"; children
+    # are "core_basic", "core_array", …).
+    _is_core_page = name.startswith("core")
+    _rich_return = _is_core_page
 
     def _summary_block(section_title: str, members: list) -> list[str]:
         out: list[str] = []
@@ -601,81 +625,94 @@ def _write_api_stub(node: dict, out_dir: pathlib.Path,
                 name_link = _member_anchor_link(m, m["name"])
                 out.append(f"| {t_cell} | {name_link} | {_md_escape_cell(m['brief'])} |")
         elif section_title == "Enumerations":
-            # Clickable HTML synopsis + on-page detail link, for every module
-            # (previously core_basic-only). Each enumerator links to the enum's
-            # detail block. Anchor: named enums use the detail heading slug;
-            # anonymous enums (no name) fall back to the stable Doxygen id so the
-            # link still resolves and never collides.
+            # Code-style synopsis (Doxygen layout) instead of name/desc table.
+            # On non-core group pages we emit the synopsis only — the
+            # per-value initializer list is already self-explanatory. On
+            # every Core-functionality page we additionally append a
+            # "More..." link, inline at the end of the brief description
+            # (or alone below the synopsis when no brief exists),
+            # pointing to that enum's detail block in the "Enumeration
+            # Type Documentation" section emitted by the detail loop
+            # below.
+            _enum_more_link = _is_core_page
+            # On every Core-functionality page the synopsis is emitted
+            # as raw HTML (NOT a ```cpp code fence) so every `cv::…`
+            # token becomes its own `<a>` linking to the enum's detail
+            # block. We hand-roll Pygments-style spans (`k`, `n`, `p`)
+            # so the existing `.highlight pre` styling kicks in and the
+            # synopsis still looks like a code block.
+            _clickable_synopsis = _is_core_page
             import html as _html_mod
             # Encode `::` so translate's cv-linkifier skips it.
             def _safe(s: str) -> str:
                 return _html_mod.escape(s).replace("::", "&#58;&#58;")
             for m in members:
-                _anchor = (m.get("name") or "").lower() or m["id"]
-                _href = f"#{_anchor}"
-                _qual = m["qualified"] or m["name"]
-                _is_strong = bool(m.get("strong"))
-                _keyword = "enum struct" if _is_strong else "enum"
-                # Enumerator name prefix (scope).
-                if _is_strong:
-                    _val_prefix = _qual + "::"
-                elif not m.get("name") and _qual:
-                    # Anonymous enum: Doxygen records the parent scope
-                    # (e.g. `cv`) in `qualified`, not a synthetic enum
-                    # name. Without this branch the per-value prefix
-                    # comes out empty and the synopsis renders
-                    # `CALIB_USE_INTRINSIC_GUESS = …` instead of the
-                    # `cv::CALIB_USE_INTRINSIC_GUESS = …` that the
-                    # live Doxygen page shows.
-                    _val_prefix = _qual + "::"
-                elif "::" in _qual:
-                    _val_prefix = _qual.rsplit("::", 1)[0] + "::"
-                else:
-                    _val_prefix = ""
-                out.append(
-                    '<div class="highlight-cpp notranslate '
-                    'opencv-enum-clickable"><div class="highlight"><pre>'
-                )
-                # Anonymous enums have no name to link; emit a bare `enum {`.
-                _name_html = (
-                    f'<a class="reference internal opencv-enum-link" href="{_href}">'
-                    f'<span class="n">{_safe(_qual)}</span></a> ' if _qual else "")
-                out.append(
-                    f'<span class="k">{_html_mod.escape(_keyword)}</span> '
-                    f'{_name_html}<span class="p">{{</span>'
-                )
-                _vals = m.get("enum_values") or []
-                for _i, _v in enumerate(_vals):
-                    _comma = ('<span class="p">,</span>'
-                              if _i < len(_vals) - 1 else '')
-                    _init = (' ' + _html_mod.escape(_v["initializer"])
-                             if _v.get("initializer") else '')
-                    _full = _val_prefix + _v["name"]
-                    # Per-value link target so every enumerator scrolls
-                    # to its own row in the Enumeration Type
-                    # Documentation table (`_enumerator_list_table` with
-                    # `with_anchors=True` emits the matching `<span
-                    # id="_CPPv4…">` per row). Without this every line
-                    # in the synopsis hit the same enum-level anchor.
-                    _v_href = (f"#{_sphinx_cpp_v4_id(_qual + '::' + _v['name'])}"
-                               if _qual else _href)
+                _more = ""
+                if _enum_more_link:
+                    # Link to the enum detail block's heading-slug id
+                    # (`### AccessFlag` → `#accessflag`). Same target
+                    # the clickable synopsis tokens use, and a literal
+                    # match on the actual element id on the page.
+                    _more = f"[More...](#{m['name'].lower()})"
+                if _clickable_synopsis:
+                    _qual = m["qualified"] or m["name"]
+                    _is_strong = bool(m.get("strong"))
+                    _keyword = "enum struct" if _is_strong else "enum"
+                    # Enumerator-name prefix: scoped → "cv::EnumName::",
+                    # unscoped → the enum's parent scope (so values
+                    # render as `cv::ACCESS_READ`).
+                    if _is_strong:
+                        _val_prefix = _qual + "::"
+                    elif "::" in _qual:
+                        _val_prefix = _qual.rsplit("::", 1)[0] + "::"
+                    else:
+                        _val_prefix = ""
+                    _href = f"#{m['name'].lower()}"  # enum detail block id
                     out.append(
-                        f'    <a class="reference internal opencv-enum-link" href="{_v_href}">'
-                        f'<span class="n">{_safe(_full)}</span></a>'
-                        f'{_init}{_comma}'
+                        '<div class="highlight-cpp notranslate '
+                        'opencv-enum-clickable"><div class="highlight"><pre>'
                     )
-                out.append('<span class="p">}</span></pre></div></div>')
-                # Blank line closes the raw-HTML block (CommonMark rule 7).
-                out.append("")
-                # "View details" is a raw-HTML link (not markdown) so it resolves
-                # to both the heading slug (named) and the raw-HTML id (anonymous).
-                # Shown with or without a brief.
-                _details = (f'<a class="reference internal opencv-enum-link" '
-                            f'href="{_href}">View details</a>')
-                if m["brief"]:
-                    out.append(f'{_md_escape_cell(m["brief"])} {_details}')
+                    # Anonymous enums have no name to link; emit a bare `enum {`.
+                    _name_html = (
+                        f'<a class="reference internal opencv-enum-link" href="{_href}">'
+                        f'<span class="n">{_safe(_qual)}</span></a> ' if _qual else "")
+                    out.append(
+                        f'<span class="k">{_html_mod.escape(_keyword)}</span> '
+                        f'{_name_html}<span class="p">{{</span>'
+                    )
+                    _vals = m.get("enum_values") or []
+                    for _i, _v in enumerate(_vals):
+                        _comma = ('<span class="p">,</span>'
+                                  if _i < len(_vals) - 1 else '')
+                        _init = (' ' + _html_mod.escape(_v["initializer"])
+                                 if _v.get("initializer") else '')
+                        _full = _val_prefix + _v["name"]
+                        # Per-value anchor: each enumerator scrolls to its own
+                        # row in the detail table (which emits the matching
+                        # `<span id="_CPPv4…">` per row).
+                        _v_href = (f"#{_sphinx_cpp_v4_id(_qual + '::' + _v['name'])}"
+                                   if _qual else _href)
+                        out.append(
+                            f'    <a class="reference internal opencv-enum-link" href="{_v_href}">'
+                            f'<span class="n">{_safe(_full)}</span></a>'
+                            f'{_init}{_comma}'
+                        )
+                    out.append('<span class="p">}</span></pre></div></div>')
+                    # Blank line closes the raw-HTML block (CommonMark rule 7).
+                    out.append("")
                 else:
-                    out.append(_details)
+                    out.append("```cpp")
+                    out.extend(_enum_synopsis_lines(m))
+                    out.append("```")
+                # Brief + the inline "More..." link (when generated).
+                if m["brief"]:
+                    line = _md_escape_cell(m["brief"])
+                    if _more:
+                        line = f"{line} {_more}"
+                        _more = ""
+                    out.append(line)
+                if _more:
+                    out.append(_more)
                 out.append("")
         else:  # Macros
             out += ["{.api-reference-table}", "| Name | Description |", "|---|---|"]
@@ -721,16 +758,22 @@ def _write_api_stub(node: dict, out_dir: pathlib.Path,
         lines.append("")
 
     # Detail blocks via `_render_member_detail` (breathe chokes); macros keep
-    # `{doxygendefine}`; enum detail is hand-rolled (core_basic only).
+    # `{doxygendefine}`; enum detail is hand-rolled (every core_* page).
     seen_define_names: set[str] = set()
     for kind_key, section_title in _MEMBERDEF_SECTIONS:
         items = node["sections"].get(section_title, [])
         if not items:
             continue
-        # Enum detail blocks render on every module page (targets of the
-        # clickable synopsis above), not just core_basic.
-        # core_basic funcs: count overloads first for `[i/n]` headings.
-        _core_basic_funcs = (name == "core_basic" and kind_key == "function")
+        # Enum detail blocks are emitted on every Core-functionality
+        # group page — the clickable summary synopsis and "More..." link
+        # both target these `#enumname` anchors. Non-core pages keep the
+        # summary-only treatment.
+        if kind_key == "enum" and not _is_core_page:
+            continue
+        # Hand-rolled function detail blocks (with [i/n] overload index
+        # in the heading) for every core_* group. Same renderer as the
+        # original core_basic-only path.
+        _core_basic_funcs = (_is_core_page and kind_key == "function")
         _ov_total: dict[str, int] = {}
         _ov_idx: dict[str, int] = {}
         _slug_seen: set[str] = set()
@@ -757,7 +800,12 @@ def _write_api_stub(node: dict, out_dir: pathlib.Path,
                     m, _ov_idx[short], _ov_total.get(short, 1), emit_anchor))
                 continue
             if kind_key == "enum":
-                # Hand-rolled (breathe's {doxygenenum} drops initializers/briefs).
+                # Every core_* page (gated by the early `continue` above).
+                # Hand-rolled in place of `{doxygenenum}` — breathe's directive
+                # drops every enumerator's initializer and `briefdescription`
+                # (renders the `<dd>` empty), so the live page's per-value
+                # `=1<<24` constants and one-line descriptions vanished.
+                # Pulling from the XML metadata ourselves restores them.
                 _qual = m["qualified"] or m["name"]
                 _is_strong = bool(m.get("strong"))
                 _keyword = "enum class" if _is_strong else "enum"
@@ -894,11 +942,16 @@ def _param_item_lines(nm: str, desc: str) -> list[str]:
     """Render one `**Parameters**` entry, indenting any multi-line / bulleted
     description so it nests under the param bullet. Without this a description
     carrying its own list (e.g. calibration `flags`) collapses into a run-on
-    blob or breaks out past the card boundary as a flat sibling list."""
+    blob or breaks out past the card boundary as a flat sibling list.
+
+    Param NAME is emitted as PLAIN TEXT (no surrounding backticks) so it
+    doesn't render as a `<code>` grey chip — per the "no grey boxes, no
+    bold on clickables" rule. Param names are not links; they read as
+    inline text alongside the description."""
     if not desc:
-        return [f"- `{nm}`"]
+        return [f"- {nm}"]
     lines = desc.split("\n")
-    out = [f"- `{nm}` — {lines[0]}"]
+    out = [f"- {nm} — {lines[0]}"]
     # Continuation lines align with the bullet's content column (2 spaces);
     # blank lines stay empty so the nested list/paragraphs render loosely.
     out += [f"  {ln}" if ln.strip() else "" for ln in lines[1:]]
