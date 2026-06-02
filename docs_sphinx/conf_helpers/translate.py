@@ -949,9 +949,12 @@ def _linkify_opencv_source_code(src: str) -> str:
 # in @note blocks would otherwise render as literal text on Sphinx because
 # Doxygen's `#name` syntax has no MyST equivalent. The lookbehind keeps
 # this from chewing on heading markers (`### Heading`), MyST attribute
-# blocks (`{#anchor}`), and existing markdown link targets (`(#anchor)`).
+# blocks (`{#anchor}`), existing markdown link targets (`(#anchor)`),
+# and raw-HTML href attributes (`href="#anchor"` / `href='#anchor'`) —
+# without the quote/equals exclusion the `#` in same-page hrefs was
+# being eaten when the bare name didn't resolve to a local target.
 _DOX_HASH_REF_RE = re.compile(
-    r"(?<![{(#\w])#(?P<name>[A-Za-z_]\w*)\b"
+    r"(?<![{(#\w\"'=])#(?P<name>[A-Za-z_]\w*)\b"
 )
 
 

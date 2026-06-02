@@ -638,7 +638,7 @@ def _write_api_stub(node: dict, out_dir: pathlib.Path,
                 )
                 # Anonymous enums have no name to link; emit a bare `enum {`.
                 _name_html = (
-                    f'<a class="reference internal" href="{_href}">'
+                    f'<a class="reference internal opencv-enum-link" href="{_href}">'
                     f'<span class="n">{_safe(_qual)}</span></a> ' if _qual else "")
                 out.append(
                     f'<span class="k">{_html_mod.escape(_keyword)}</span> '
@@ -660,7 +660,7 @@ def _write_api_stub(node: dict, out_dir: pathlib.Path,
                     _v_href = (f"#{_sphinx_cpp_v4_id(_qual + '::' + _v['name'])}"
                                if _qual else _href)
                     out.append(
-                        f'    <a class="reference internal" href="{_v_href}">'
+                        f'    <a class="reference internal opencv-enum-link" href="{_v_href}">'
                         f'<span class="n">{_safe(_full)}</span></a>'
                         f'{_init}{_comma}'
                     )
@@ -670,7 +670,7 @@ def _write_api_stub(node: dict, out_dir: pathlib.Path,
                 # "View details" is a raw-HTML link (not markdown) so it resolves
                 # to both the heading slug (named) and the raw-HTML id (anonymous).
                 # Shown with or without a brief.
-                _details = (f'<a class="reference internal" '
+                _details = (f'<a class="reference internal opencv-enum-link" '
                             f'href="{_href}">View details</a>')
                 if m["brief"]:
                     out.append(f'{_md_escape_cell(m["brief"])} {_details}')

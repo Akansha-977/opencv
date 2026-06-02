@@ -42,18 +42,51 @@ html[data-theme="light"] {
     --opencv-accent: #003a6b;
 }
 html[data-theme="dark"] {
+    /* Force same link blue across themes — pydata-sphinx-theme overrides
+     * these to lighter blues in dark mode, leaving body/sidebar links
+     * not-blue. Redefining at the :root-equivalent makes every consumer
+     * of the variable (theme rules, our custom rules, content links)
+     * pick up the light-mode blue. */
+    --pst-color-link: #0969da;
+    --pst-color-link-hover: #0550ae;
     --opencv-accent: #a4c9ff;
 }
 
 .bd-content a { text-decoration: none; color: #0969da; }
-html[data-theme="dark"] .bd-article-container a { color: #539bf5 !important; }
+/* Dark mode: same #0969da on EVERY link — body content, toctree
+ * `.reference.internal` rows under Classes/Functions/Enumerations,
+ * sidebar, breadcrumbs. The pydata-sphinx-theme ships dark-mode
+ * overrides that paint several link classes a lighter blue (or
+ * inherited gray for `.reference.internal` inside `.toctree-wrapper`)
+ * — these blanket selectors restore the light-mode blue everywhere
+ * a link appears. `a:not([href^="#"])` does NOT apply: same-page
+ * anchors should be blue too. */
+html[data-theme="dark"] .bd-article-container a,
+html[data-theme="dark"] .bd-article-container a.reference,
+html[data-theme="dark"] .bd-article-container a.reference.internal,
+html[data-theme="dark"] .bd-article-container a.reference.external,
+html[data-theme="dark"] .bd-article-container .toctree-wrapper a,
+html[data-theme="dark"] .bd-article-container .toctree-l1 > a,
+html[data-theme="dark"] .bd-article-container .toctree-l2 > a,
+html[data-theme="dark"] .bd-article-container .toctree-l3 > a,
+html[data-theme="dark"] .bd-article-container .toctree-l4 > a,
+html[data-theme="dark"] .bd-article-container li > a {
+    color: #0969da !important;
+}
 .bd-content a:hover {
     text-decoration: underline;
     text-underline-offset: 0.22em;
     text-decoration-thickness: 1px;
     color: #0550ae;
 }
-html[data-theme="dark"] .bd-article-container a:hover { color: #6cb6ff !important; }
+html[data-theme="dark"] .bd-article-container a:hover,
+html[data-theme="dark"] .bd-article-container a.reference:hover,
+html[data-theme="dark"] .bd-article-container a.reference.internal:hover,
+html[data-theme="dark"] .bd-article-container a.reference.external:hover,
+html[data-theme="dark"] .bd-article-container .toctree-wrapper a:hover,
+html[data-theme="dark"] .bd-article-container li > a:hover {
+    color: #0550ae !important;
+}
 .bd-content a > code, .bd-content code > a { color: inherit; }
 
 /* Enum links: ONE consistent style across ALL modules — blue (both themes),
@@ -79,13 +112,13 @@ html[data-theme="dark"] .bd-content code.opencv-enum-sig > a,
 html[data-theme="dark"] .bd-content .opencv-enum-clickable a,
 html[data-theme="dark"] .bd-content .opencv-enum-clickable a span,
 html[data-theme="dark"] .bd-content code > a.opencv-include-link {
-    color: #539bf5 !important;
+    color: #0969da !important;
 }
 html[data-theme="dark"] .bd-content a.opencv-enum-link:hover,
 html[data-theme="dark"] .bd-content code.opencv-enum-sig > a:hover,
 html[data-theme="dark"] .bd-content .opencv-enum-clickable a:hover,
 html[data-theme="dark"] .bd-content code > a.opencv-include-link:hover {
-    color: #6cb6ff !important;
+    color: #0550ae !important;
 }
 
 /* Typedef Documentation: every clickable token in the per-typedef
@@ -93,19 +126,25 @@ html[data-theme="dark"] .bd-content code > a.opencv-include-link:hover {
  * declaration `typedef Vec<uchar,2> cv::Vec2b`) is an `<a>` inside a
  * `<code>` and gets dimmed by the `code > a { color: inherit }` rule
  * above. Force the theme link blue on every anchor inside the section
- * in light mode; dark mode is left alone. */
-html:not([data-theme="dark"]) .bd-content #typedef-documentation a {
+ * in BOTH themes — clickable text stays blue in dark mode too. */
+.bd-content #typedef-documentation a {
     color: var(--pst-color-link, #0969da) !important;
+}
+html[data-theme="dark"] .bd-content #typedef-documentation a {
+    color: #0969da !important;
 }
 
 /* Function Documentation: same problem as the typedef section — every
  * clickable token inside per-function detail blocks (parameter types
  * like `Matx`, `_Tp`, the include path, etc.) is an `<a>` inside a
  * `<code>` and gets dimmed by `code > a { color: inherit }`. Force
- * the theme link blue on every anchor inside the section in light
- * mode; dark mode is left alone. */
-html:not([data-theme="dark"]) .bd-content #function-documentation a {
+ * the theme link blue on every anchor inside the section in BOTH
+ * themes. */
+.bd-content #function-documentation a {
     color: var(--pst-color-link, #0969da) !important;
+}
+html[data-theme="dark"] .bd-content #function-documentation a {
+    color: #0969da !important;
 }
 
 /* --- Front-matter table (.opencv-meta-table) --------------------------- */
@@ -345,7 +384,7 @@ html[data-theme="dark"] table.opencv-meta-table td:last-child { border-right: no
     color: var(--pst-color-primary) !important;
     font-weight: 600 !important;
 }
-html[data-theme="dark"] .bd-sidebar-primary nav.bd-links .current > a { color: #539bf5 !important; }
+html[data-theme="dark"] .bd-sidebar-primary nav.bd-links .current > a { color: #0969da !important; }
 
 /* --- Code blocks ------------------------------------------------------- */
 div.highlight {
@@ -413,6 +452,31 @@ html[data-theme="dark"] code,
 html[data-theme="dark"] .sig {
     background-color: #2d333b !important;
     color: #cdd9e5 !important;
+}
+/* Clickable code chips stay link-blue in dark mode. The blanket
+ * `code { color: #cdd9e5 !important; }` above repaints every <code>
+ * grey, including `<code>` wrapped in an `<a>` (Classes/Functions/
+ * Typedefs tables wrap their cell text in `<a><span class="std std-doc">
+ * <code><span class="pre">…</span></code></span></a>` — same pattern
+ * for See Also and prose cross-refs). Force every descendant of an
+ * `<a>` back to the link blue so the text reads as a hyperlink. */
+html[data-theme="dark"] .bd-article-container a code,
+html[data-theme="dark"] .bd-article-container a code *,
+html[data-theme="dark"] .bd-article-container a > span code,
+html[data-theme="dark"] .bd-article-container a > span code *,
+html[data-theme="dark"] .bd-article-container a .std,
+html[data-theme="dark"] .bd-article-container a .xref,
+html[data-theme="dark"] .bd-article-container a .pre {
+    color: #0969da !important;
+}
+html[data-theme="dark"] .bd-article-container a:hover code,
+html[data-theme="dark"] .bd-article-container a:hover code *,
+html[data-theme="dark"] .bd-article-container a:hover > span code,
+html[data-theme="dark"] .bd-article-container a:hover > span code *,
+html[data-theme="dark"] .bd-article-container a:hover .std,
+html[data-theme="dark"] .bd-article-container a:hover .xref,
+html[data-theme="dark"] .bd-article-container a:hover .pre {
+    color: #0550ae !important;
 }
 
 /* --- Heading anchors fade-in ------------------------------------------ */
@@ -803,7 +867,7 @@ section#member-enumeration-documentation .highlight-cpp .n {
     color: #0969da !important;
 }
 html[data-theme="dark"] section#member-enumeration-documentation .highlight-cpp .n {
-    color: #539bf5 !important;
+    color: #0969da !important;
 }
 
 /* Legacy anchor target, kept for pages with old markup. */
@@ -824,7 +888,7 @@ html[data-theme="dark"] section#member-enumeration-documentation .highlight-cpp 
     font-family: var(--pst-font-family-monospace);
 }
 html[data-theme="dark"] .opencv-enum-heading .opencv-enum-name {
-    color: #539bf5;
+    color: #0969da;
 }
 .opencv-enum-detail {
     margin: 0 0 1.5rem;
@@ -841,13 +905,13 @@ html[data-theme="dark"] .opencv-enum-heading .opencv-enum-name {
     scroll-margin-top: 5rem;        /* clear the sticky navbar on hash landing */
 }
 html[data-theme="dark"] .opencv-enum-detail dt {
-    border-left-color: #539bf5;
+    border-left-color: #0969da;
 }
 .opencv-enum-detail dt .opencv-enum-name {
     color: #0969da;
 }
 html[data-theme="dark"] .opencv-enum-detail dt .opencv-enum-name {
-    color: #539bf5;
+    color: #0969da;
 }
 .opencv-enum-detail dt .opencv-enum-init {
     color: var(--pst-color-text-muted);
@@ -1307,8 +1371,8 @@ a.opencv-class-more:hover {
     color: #0550ae;
     text-decoration: underline;
 }
-html[data-theme="dark"] a.opencv-class-more { color: #539bf5; }
-html[data-theme="dark"] a.opencv-class-more:hover { color: #6cb6ff; }
+html[data-theme="dark"] a.opencv-class-more { color: #0969da; }
+html[data-theme="dark"] a.opencv-class-more:hover { color: #0550ae; }
 
 /* --- Class-page source-file footer ("generated from the following file") ---
  * Emitted under a popping `## ` heading (see _write_class_stub) so it renders
@@ -1375,7 +1439,7 @@ dl.opencv-examples a.opencv-example-link {
     color: #0969da;
 }
 html[data-theme="dark"] dl.opencv-examples a.opencv-example-link {
-    color: #539bf5;
+    color: #0969da;
 }
 dl.opencv-examples a.opencv-example-link:hover {
     text-decoration: underline;
