@@ -588,30 +588,63 @@ def _doxygen_desc_to_md(el, h_level: int = 3) -> str:
             r"([a-z]{1,3}[0-9a-f]{20,})$", refid)
         if cm:
             page = cm.group(1)
-            slug = re.sub(r"_+", "-", refid)
+            # Sphinx lowercases anchor ids when slugifying the
+            # `({refid})=` MyST target a member-detail block emits, so
+            # the fragment must be lowercased too. Without this the
+            # link points at e.g.
+            # `classcv_1_1__InputArray.html#classcv-1-1-InputArray-1a4ee92…`
+            # but the page only carries the lowercased
+            # `#classcv-1-1-inputarray-1a4ee92…`, and the browser
+            # silently lands at the top of the page instead of the
+            # member's detail row.
+            slug = re.sub(r"_+", "-", refid).lower()
             return f"{page}.html#{slug}"
         # Group-anchored member on the current group page.
         #
         # Doxygen uses two refid suffixes for group members:
-        #   * `_1ga<hex>`  — function in a group → anchor is the
-        #                    `_func_slug(name)` (cv-name) emitted by
-        #                    `_render_core_basic_func`.
-        #   * `_1gga<hex>` — enum VALUE in a group → anchor is the
-        #                    C++ v4 id (`_CPPv4N…E`) emitted by the
-        #                    per-value `<span id>` in the enum
-        #                    detail table. The enum-type's parent
-        #                    name is captured via `_CV_SYMBOL_URL`
-        #                    elsewhere; here we use the value name
-        #                    + the parent enum name when available
-        #                    to mint the same id.
-        m = re.search(r"_1(gga|ga)([0-9a-f]+)$", refid)
+        #   * `_1ga<hex>`  — function in a group. Both renderers
+        #                    (`_render_core_basic_func` on core_* pages
+        #                    and `_render_member_detail` everywhere
+        #                    else) emit a `### name()` section heading,
+        #                    which Sphinx auto-slugs to `#name.lower()`
+        #                    — so the lowercased short name works as
+        #                    the anchor on every api page. (Core pages
+        #                    additionally carry a `{#cv-slug}` anchor
+        #                    from the explicit attribute, but we don't
+        #                    need that since the section-id anchor is
+        #                    universal.) Previously this branch always
+        #                    minted `#cv-{slug}`, which only existed on
+        #                    core pages — every cv:: reference on
+        #                    calib/dnn/imgproc/etc. landed at the top
+        #                    of the page instead of the function.
+        #   * `_1gga<hex>` — enum VALUE in a group. We don't have the
+        #                    parent enum's name from the refid alone,
+        #                    so leave the link out and the caller
+        #                    renders plain text.
+        m = re.search(r"^group__(?P<grp>[A-Za-z0-9_]+?)_1(?P<kind>gga|ga)(?P<hex>[0-9a-f]+)$", refid)
         if m:
-            kind = m.group(1)
+            kind = m.group("kind")
             if kind == "ga":  # function
                 short = (name.rsplit("::", 1)[-1] if name else "")
                 short = short.split("(", 1)[0].strip()
-                if short:
-                    return f"#{_func_slug(short)}"
+                if not short:
+                    return None
+                # Derive the function's HOME page from the refid's
+                # group prefix: `group__calib_fisheye_1ga…` lives on
+                # `calib_fisheye.html` (Doxygen escapes `_` as `__`,
+                # so collapsing `__` → `_` gives the page stem). A
+                # See-Also reference from `calib.html` pointing to
+                # `fisheye::calibrate` would otherwise resolve to
+                # `calib.html#calibrate` (no such anchor) instead of
+                # the actual `calib_fisheye.html#calibrate`. Emitting
+                # the full page-prefixed URL works on the home page
+                # too — browsers treat `samepage.html#frag` as a
+                # same-document scroll. The anchor itself stays
+                # `name.lower()`: both renderers (`_render_member_detail`
+                # and `_render_core_basic_func`) emit a `### name()`
+                # section heading whose id is the lowercased name.
+                page_stem = m.group("grp").replace("__", "_")
+                return f"{page_stem}.html#{short.lower()}"
             # Enum-value `gga` — let it fall through; the value's
             # per-row `<span id="_CPPv4…">` anchor is on the page only
             # if the enum's detail block was emitted, but we don't
