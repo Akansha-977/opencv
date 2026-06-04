@@ -1,0 +1,70 @@
+{# Navbar version-switcher: a plain `<select>` rendered right after the
+   `navbar-logo` slot. Populated client-side from `_static/versions.js`,
+   which is regenerated at every Sphinx build by
+   `conf_helpers/versions.py` from the live `docs.opencv.org` dropdown.
+
+   The first option is the current build (`release` from conf.py) with an
+   empty value — selecting it is a no-op (no navigation). Every other
+   option carries the absolute URL of that version's docs root; the
+   `onchange` handler navigates the same tab to that URL.
+
+   Rendered inside both the desktop navbar and the mobile drawer; the
+   inline `<script>` walks every `#opencv-version-select` it can find so
+   both copies stay populated. #}
+<form class="opencv-version-switcher" role="search"
+      aria-label="OpenCV documentation version"
+      onsubmit="return false">
+  <select id="opencv-version-select"
+          aria-label="Select OpenCV documentation version"
+          onchange="if(this.value){window.location.href=this.value;}">
+    <option value="" selected>{{ release }}</option>
+  </select>
+</form>
+<script src="{{ pathto('_static/versions.js', 1) }}"></script>
+<script>
+  (function () {
+    function resetSelection() {
+      // Force the dropdown back to its first option (the current
+      // release). Without this, after the user picks an older version
+      // and then hits the browser Back button, the page restores from
+      // the bfcache with the OLD `<select>` state — so the dropdown
+      // reads "4.14.0-dev" / "4.11.0" / etc. on a 5.0 page. The first
+      // option is always the current release (built by `populate()`
+      // below), so `selectedIndex = 0` is the deterministic reset.
+      document.querySelectorAll('#opencv-version-select').forEach(
+        function (sel) { sel.selectedIndex = 0; });
+    }
+    function populate() {
+      var data = window.OPENCV_VERSIONS;
+      if (!data || !Array.isArray(data.versions)) return;
+      var selects = document.querySelectorAll('#opencv-version-select');
+      selects.forEach(function (sel) {
+        // Clear the server-rendered placeholder; rebuild from data so
+        // the dropdown order matches the live docs.opencv.org list.
+        while (sel.firstChild) sel.removeChild(sel.firstChild);
+        var here = document.createElement('option');
+        here.value = '';            // empty -> no navigation on re-select
+        here.textContent = data.current;
+        here.selected = true;
+        sel.appendChild(here);
+        data.versions.forEach(function (v) {
+          var opt = document.createElement('option');
+          opt.value = v.url;
+          opt.textContent = v.label;
+          sel.appendChild(opt);
+        });
+        sel.selectedIndex = 0;
+      });
+    }
+    if (document.readyState === 'loading') {
+      document.addEventListener('DOMContentLoaded', populate);
+    } else {
+      populate();
+    }
+    // `pageshow` fires both on initial load AND on bfcache restore
+    // (browser Back button). Resetting here catches the case where the
+    // browser repopulates the `<select>` with its last-chosen value
+    // after we navigated away and returned.
+    window.addEventListener('pageshow', resetSelection);
+  })();
+</script>
