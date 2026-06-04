@@ -20,11 +20,12 @@ import conf_helpers.build      # noqa: F401  bib staging, scans, API stubs, inde
 import conf_helpers.patches    # noqa: F401  Sphinx C++ xref + warning patches.
 from conf_helpers.translate import _source_read
 from conf_helpers.postprocess import _inline_coll_graphs_on_finish
+from conf_helpers.versions import write_versions_js
 
 # -- Project ----------------------------------------------------------------
 project = "OpenCV"
 author = "OpenCV Team"
-release = "5.x"
+release = "5.0"
 
 # -- Sphinx core ------------------------------------------------------------
 extensions = ["myst_parser"]
@@ -142,8 +143,20 @@ html_css_files = [
     "&family=JetBrains+Mono:wght@400;500&display=swap",
     "custom.css",
 ]
+# Regenerate `_static/versions.js` from the live docs.opencv.org dropdown
+# at every build start so the navbar version switcher stays in sync with
+# whatever OpenCV publishes upstream. Failure modes (no network, server
+# 5xx) fall back to an embedded snapshot inside `write_versions_js` so
+# the build never aborts on a transient fetch error.
+write_versions_js(
+    pathlib.Path(__file__).parent / "_static", current_label=release)
+
 html_theme_options = {
     "logo": {"text": f"OpenCV {release}"},
+    # Navbar layout: logo on the left, version switcher right beside it
+    # — mirrors the legacy docs.opencv.org header where the version
+    # selector sits inline with the wordmark.
+    "navbar_start": ["navbar-logo", "opencv-version-switcher"],
     "header_links_before_dropdown": 6,
     "external_links": [
         {"docname": master_doc,                "name": "Main Page"},
