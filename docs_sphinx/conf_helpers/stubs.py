@@ -1140,8 +1140,17 @@ def _write_api_stub(node: dict, out_dir: pathlib.Path,
                     "| Return | Name | Description |", "|---|---|---|"]
             for m in members:
                 ret_type = _md_escape_cell(m["type"])
-                label = _func_sig_md(m["name"], m.get("params_sig"))
-                sig_link = _member_anchor_link(m, label, raw=True)
+                # Per-segment-clickable signature: function name (with
+                # `cv::` prefix) wrapped in ONE `<a>`, parameter types
+                # left as plain code tokens so step 8g's pass 1 walks
+                # the inner HTML, skips the embedded function anchor,
+                # and linkifies each recognised type identifier
+                # (`InputArray`, `OutputArray`, `Mat`, `_Tp`, etc.) as
+                # its own `<a>`. Replaces the previous
+                # `_func_sig_md`+`_member_anchor_link(raw=True)` combo
+                # which wrapped the WHOLE multi-line signature in one
+                # link and rendered the row as a single boxed unit.
+                sig_link = _func_row_split_md(m)
                 if not ret_type:
                     ret = "\u00a0"  # ctor/dtor: blank cell, never backticked
                 elif _rich_return:
@@ -1634,12 +1643,22 @@ def _render_member_detail(m: dict, full_name: str) -> list[str]:
             if _u:
                 _url_by_text[_t] = _u
 
+    # Always emit the `<code class="docutils literal notranslate">` HTML
+    # form (escaped) so translate-step 8g's pass-1 sees the same
+    # element shape whether Doxygen supplied `<ref>` data or not — and
+    # can linkify recognised tokens (`InputArray`, `OutputArray`, …)
+    # inside the signature. The old `` `ln` `` markdown-backtick
+    # fallback only became `<code>` at MyST-render time, AFTER step 8g
+    # had run, so parameter types in detail blocks without sig_refs
+    # stayed inert text.
+    import html as _html_pkg
     def _code(ln: str) -> str:
         if _url_by_text:
             _h = _sig_html_with_links(ln, _url_by_text)
             if _h is not None:
                 return f'<code class="docutils literal notranslate">{_h}</code>'
-        return f"`{ln}`"
+        return (f'<code class="docutils literal notranslate">'
+                f'{_html_pkg.escape(ln)}</code>')
     _sig = ([f"`{tmpl}`"] if tmpl else []) + [_code(ln) for ln in sig_lines]
     out += ["{.opencv-api-sig}", "\\\n".join(_sig), ""]
 
@@ -1720,12 +1739,17 @@ def _render_core_basic_func(m: dict, idx: int, total: int,
             if _u:
                 _url_by_text[_t] = _u
 
+    # Always emit the `<code class="docutils literal notranslate">` HTML
+    # form so translate-step 8g pass 1 can linkify parameter-type
+    # tokens uniformly (see matching change in `_render_member_detail`).
+    import html as _html_pkg
     def _code(ln: str) -> str:
         if _url_by_text:
             _h = _sig_html_with_links(ln, _url_by_text)
             if _h is not None:
                 return f'<code class="docutils literal notranslate">{_h}</code>'
-        return f"`{ln}`"
+        return (f'<code class="docutils literal notranslate">'
+                f'{_html_pkg.escape(ln)}</code>')
     _sig = ([f"`{m['template']}`"] if m.get("template") else []) + \
         [_code(ln) for ln in sig_lines]
     out += ["{.opencv-api-sig}", "\\\n".join(_sig), ""]
