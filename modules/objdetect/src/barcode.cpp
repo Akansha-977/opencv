@@ -339,20 +339,21 @@ bool BarcodeImpl::detectAndDecodeMulti(InputArray img, vector<string> &decoded_i
 // Public class implementation
 
 BarcodeDetector::BarcodeDetector()
-    : BarcodeDetector(string(), string())
+    : BarcodeDetector(std::string())
 {
 }
 
-BarcodeDetector::BarcodeDetector(const string &prototxt_path, const string &model_path)
+BarcodeDetector::BarcodeDetector(const string &super_resolution_model_path)
 {
     Ptr<BarcodeImpl> p_ = new BarcodeImpl();
     p = p_;
     p_->sr = make_shared<SuperScale>();
-    if (!prototxt_path.empty() && !model_path.empty())
+    // The optional Super Resolution model is a single-file ONNX network (Caffe support
+    // has been removed). An empty path simply disables super resolution.
+    if (!super_resolution_model_path.empty())
     {
-        CV_Assert(utils::fs::exists(prototxt_path));
-        CV_Assert(utils::fs::exists(model_path));
-        int res = p_->sr->init(prototxt_path, model_path);
+        CV_Assert(utils::fs::exists(super_resolution_model_path));
+        int res = p_->sr->init(super_resolution_model_path);
         CV_Assert(res == 0);
         p_->use_nn_sr = true;
     }

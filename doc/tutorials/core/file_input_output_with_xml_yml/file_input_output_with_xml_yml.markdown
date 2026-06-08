@@ -4,6 +4,7 @@ File Input and Output using XML / YAML / JSON files {#tutorial_file_input_output
 @tableofcontents
 
 @prev_tutorial{tutorial_discrete_fourier_transform}
+@next_tutorial{tutorial_how_to_use_OpenCV_parallel_for_}
 @next_tutorial{tutorial_how_to_use_OpenCV_parallel_for_new}
 
 |    |    |
@@ -95,7 +96,7 @@ you may access it. For sequences you need to go through them to query a specific
     @snippet cpp/tutorial_code/core/file_input_output/file_input_output.cpp readNum
     @end_toggle
     @add_toggle_python
-    @snippet cpp/tutorial_code/core/file_input_output/file_input_output.cpp readNum
+    @snippet python/tutorial_code/core/file_input_output/file_input_output.py readNum
     @end_toggle
 -#  **Input/Output of OpenCV Data structures.** Well these behave exactly just as the basic C++
     and Python types:

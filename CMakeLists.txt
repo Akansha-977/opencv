@@ -77,6 +77,12 @@ if(OPENCV_WORKAROUND_CMAKE_20989)
   set(CMAKE_SYSTEM_PROCESSOR ${CMAKE_SYSTEM_PROCESSOR_BACKUP})
 endif()
 
+include(CheckLanguage)
+check_language(ASM)
+if(CMAKE_ASM_COMPILER)
+  enable_language(ASM)
+endif()
+
 enable_testing()
 
 ocv_cmake_hook(POST_CMAKE_BOOTSTRAP)
