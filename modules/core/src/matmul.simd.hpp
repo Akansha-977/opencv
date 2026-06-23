@@ -1611,17 +1611,26 @@ static void gemmImpl( Mat A, Mat B, double alpha,
         break;
     }
 
-    // fastGemm f32 fast path: route large, plain (non-GEMM_3_T) single-precision
-    // products through the ported packed/threaded kernel; everything else (small
-    // sizes, f64/complex, transpose-C, broadcast-C, in-place A/B) falls through to
-    // the existing implementation below.
+    // fastGemm f32 fast path: route large single-precision products through the
+    // ported packed/threaded kernel. GEMM_3_T only transposes the additive C term
+    // (the product is unaffected), so it is handled by materializing C^T into D
+    // before the kernel runs; everything else (small sizes, f64/complex,
+    // broadcast-C, in-place A/B, in-place transposed-C) falls through to the
+    // existing implementation below.
 #if CV_GEMM_HAVE_FAST32F
-    if( type == CV_32F && !(flags & GEMM_3_T) )
+    if( type == CV_32F )
     {
+        const bool trans_c = (flags & GEMM_3_T) != 0;
         const int fgM = d_size.height, fgN = d_size.width, fgK = len;
+        // C must match the result shape (M x N), or its transpose (N x M) for GEMM_3_T.
+        const bool c_shape_ok = C.empty() ||
+            ( !trans_c && C.rows == fgM && C.cols == fgN ) ||
+            (  trans_c && C.rows == fgN && C.cols == fgM );
+        // In-place transposed C (C aliasing D) would need a temp; leave it to the generic path.
+        const bool c_alias_ok = !trans_c || C.empty() || C.data != D.data;
         if( (uint64_t)fgM * fgN * fgK >= cv_gemm_fast32f_min_work &&
             D.data != A.data && D.data != B.data &&
-            (C.empty() || (C.rows == fgM && C.cols == fgN)) )
+            c_shape_ok && c_alias_ok )
         {
             const bool trans_a = (flags & GEMM_1_T) != 0;
             const bool trans_b = (flags & GEMM_2_T) != 0;
@@ -1630,8 +1639,18 @@ static void gemmImpl( Mat A, Mat B, double alpha,
             if( !trans_a ) { lda0 = (int)sa; lda1 = 1; } else { lda0 = 1; lda1 = (int)sa; }
             if( !trans_b ) { ldb0 = (int)sb; ldb1 = 1; } else { ldb0 = 1; ldb1 = (int)sb; }
             const float beta_eff = (C.empty() || beta == 0.) ? 0.f : (float)beta;
-            if( beta_eff != 0.f && C.data != D.data )
-                C.copyTo(D);
+            // Materialize the beta*C term into D before the kernel (which scales D by
+            // beta and accumulates alpha*A*B). For GEMM_3_T, D must receive C^T.
+            if( beta_eff != 0.f )
+            {
+                if( !trans_c )
+                {
+                    if( C.data != D.data )
+                        C.copyTo(D);
+                }
+                else
+                    cv::transpose(C, D); // C is N x M -> D (M x N) holds C^T
+            }
             fastGemm32f_run(fgM, fgN, fgK, (float)alpha,
                             A.ptr<float>(), lda0, lda1,
                             B.ptr<float>(), ldb0, ldb1,
