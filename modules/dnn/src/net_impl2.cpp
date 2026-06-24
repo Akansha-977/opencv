@@ -13,6 +13,12 @@
 #include <onnxruntime_cxx_api.h>
 #endif
 
+// TODO(openvino-engine-new): Add OpenVINO as a backend for Engine New.
+// Reference: CUDA-for-Engine-New work in opencv/opencv#29286 (op_cuda.cpp + per-op
+// executors here in net_impl2.cpp). Plan to reuse existing OpenVINO machinery in
+// ie_ngraph.cpp rather than writing backend glue from scratch. Remove from Engine
+// Classic (net_openvino.cpp) once this path works.
+
 namespace cv {
 namespace dnn {
 CV__DNN_INLINE_NS_BEGIN
