@@ -76,12 +76,23 @@ public:
 } // namespace
 #endif
 
+#ifdef HAVE_DNN_NGRAPH
+void registerOpenVINOCommonExecs();   // op_openvino.cpp (inline namespace)
+void registerOpenVINOSubgraphExec();  // graph_fusion_openvino.cpp (inline namespace)
+#endif
+
 void initializeLayerFactory()
 {
     CV_TRACE_FUNCTION();
 
 #if defined(HAVE_PROTOBUF) && !defined(BUILD_PLUGIN)
     static ProtobufShutdown protobufShutdown; CV_UNUSED(protobufShutdown);
+#endif
+
+#ifdef HAVE_DNN_NGRAPH
+    // New graph engine: per-op OpenVINO executors + subgraph (whole-run) OpenVINO executor.
+    registerOpenVINOCommonExecs();
+    registerOpenVINOSubgraphExec();
 #endif
 
     CV_DNN_REGISTER_LAYER_CLASS(If,             IfLayer);

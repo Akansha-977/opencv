@@ -317,30 +317,30 @@ public:
         return g;
     }*/
 
-    virtual const std::vector<Arg>& append(Ptr<Layer>& layer,
+    virtual const std::vector<Arg>& append(Ptr<OpData>& op,
                 const std::vector<std::string>& outnames) override
     {
-        CV_Assert(layer);
+        CV_Assert(op);
         int i, noutputs = (int)outnames.size();
-        //CV_Assert(layer->minNumOutputs() <= noutputs && noutputs <= layer->maxNumOutputs());
+        //CV_Assert(op->minNumOutputs() <= noutputs && noutputs <= op->maxNumOutputs());
 
-        layer->outputs.resize(noutputs);
+        op->outputs.resize(noutputs);
         for (i = 0; i < noutputs; i++) {
             Arg outarg = netimpl_->getArg(outnames[i]);
             ArgKind kind = netimpl_->argKind(outarg);
             CV_Assert(kind == DNN_ARG_TEMP || kind == DNN_ARG_OUTPUT);
-            layer->outputs[i] = outarg;
+            op->outputs[i] = outarg;
         }
 
-        prog_.push_back(layer);
-        return layer->outputs;
+        prog_.push_back(op);
+        return op->outputs;
     }
 
-    virtual Arg append(Ptr<Layer>& layer,
+    virtual Arg append(Ptr<OpData>& op,
                const std::string& outname) override
     {
         std::vector<std::string> outnames = {outname};
-        const std::vector<Arg>& outputs = append(layer, outnames);
+        const std::vector<Arg>& outputs = append(op, outnames);
         CV_Assert(outputs.size() == 1);
         return outputs[0];
     }
@@ -379,8 +379,8 @@ public:
         for (size_t i = 0; i < nlayers; i++) {
             prindent(strm, argindent);
             strm << "// op #" << i << "\n";
-            const Ptr<Layer>& layer = prog_[i];
-            layer->dump(strm, argindent, i+1 < nlayers);
+            const Ptr<OpData>& op = prog_[i];
+            op->dump(strm, argindent, i+1 < nlayers);
         }
         prindent(strm, subindent);
         strm << "]\n";
@@ -401,15 +401,30 @@ public:
         netimpl_->checkArgs(outputs);
         outputs_ = outputs;
     }
-    virtual const std::vector<Ptr<Layer> >& prog() const override { return prog_; }
-    virtual void setProg(const std::vector<Ptr<Layer> >& newprog) override { prog_ = newprog; }
+    virtual const std::vector<Ptr<OpData> >& prog() const override { return prog_; }
+    virtual int opBackend(int opidx) const override
+    {
+        return (opidx >= 0 && opidx < (int)execBackend_.size()) ? execBackend_[opidx]
+                                                                : DNN_BACKEND_OPENCV;
+    }
+    virtual void setProg(const std::vector<Ptr<OpData> >& newprog) override
+    {
+        prog_ = newprog;
+        exec_.clear();
+        execBackend_.clear();
+        inH2D_.clear();
+        outD2H_.clear();
+    }
 
-protected:
     Net::Impl* netimpl_;
     std::string name_;
     std::vector<Arg> inputs_;
     std::vector<Arg> outputs_;
-    std::vector<Ptr<Layer> > prog_;
+    std::vector<Ptr<OpData> > prog_;
+    std::vector<Ptr<Layer> > exec_;
+    std::vector<int> execBackend_;
+    std::vector<std::vector<uchar> > inH2D_;
+    std::vector<std::vector<uchar> > outD2H_;
 };
 
 Ptr<Graph> Graph::create(void* netimpl, const std::string& name,
@@ -567,16 +582,99 @@ void Net::Impl::prepareForInference()
         fuseTransposeMatMul();
         fuseScaleSoftmax();
         fuseBasic();
-        useBlockLayout();
-        assignBuffers();
         totalLayers = updateGraphOfs(mainGraph, 0, true);
         prepared = true;
         finalizeLayers = true;
     }
 }
 
+void Net::Impl::finalizeGraph(const Ptr<Graph>& graph, bool useOpenVINO)
+{
+    GraphImpl* g = static_cast<GraphImpl*>(graph.get());
+    const std::vector<Ptr<OpData> >& prog = g->prog_;
+    size_t i, nops = prog.size();
+    g->exec_.assign(nops, Ptr<Layer>());
+    g->execBackend_.assign(nops, DNN_BACKEND_OPENCV);
+
+    for (i = 0; i < nops; i++) {
+        const Ptr<OpData>& op = prog[i];
+        if (!op)
+            continue;
+
+        // recurse into subgraphs (If/Loop bodies) first
+        const std::vector<Ptr<Graph> >* subs = op->subgraphs();
+        if (subs) {
+            for (const Ptr<Graph>& sub : *subs)
+                finalizeGraph(sub, useOpenVINO);
+        }
+
+        Ptr<Layer> exec;
+        int backend = DNN_BACKEND_OPENCV;
+#ifdef HAVE_INF_ENGINE
+        // Try the OpenVINO executor first; its create() returns null if the op is unsupported.
+        if (useOpenVINO && !subs) {
+            exec = LayerFactory::createExec(op->type, DNN_BACKEND_INFERENCE_ENGINE_NGRAPH, op, nullptr);
+            if (exec) {
+                exec->preferableTarget = preferableTarget;
+                backend = DNN_BACKEND_INFERENCE_ENGINE_NGRAPH;
+            }
+        }
+#endif
+        if (!exec) {
+            exec = LayerFactory::createExec(op->type, DNN_BACKEND_OPENCV, op, nullptr);
+            if (!exec)
+                exec = op.dynamicCast<Layer>();
+            backend = DNN_BACKEND_OPENCV;
+        }
+        CV_Assert(exec);
+        g->exec_[i] = exec;
+        g->execBackend_[i] = backend;
+        CV_LOG_INFO(NULL, cv::format("DNN/NewEngine: finalize op #%zu '%s' (%s) -> %s",
+                    i, op->name.c_str(), op->type.c_str(),
+                    backend == DNN_BACKEND_INFERENCE_ENGINE_NGRAPH ? "OpenVINO" : "CPU"));
+    }
+}
+
+void Net::Impl::finalize()
+{
+#ifdef HAVE_ONNXRUNTIME
+    if (ort_session)
+        return;  // ONNX Runtime manages its own execution session
+#endif
+    if (!mainGraph)
+        return;
+    if (!prepared)
+        prepareForInference();
+    if (finalized)
+        return;
+
+    bool useOpenVINO = false;
+#ifdef HAVE_INF_ENGINE
+    if (preferableBackend == DNN_BACKEND_INFERENCE_ENGINE ||
+        preferableBackend == DNN_BACKEND_INFERENCE_ENGINE_NGRAPH)
+        useOpenVINO = true;
+#endif
+
+    for (const Ptr<Graph>& g : allgraphs)
+        finalizeGraph(g, useOpenVINO);
+    useBlockLayout();
+#ifdef HAVE_DNN_NGRAPH
+    if (useOpenVINO && !openvinoFused_) {
+        fuseOpenVINO();
+        openvinoFused_ = true;
+    }
+#endif
+    assignBuffers();
+    totalLayers = updateGraphOfs(mainGraph, 0, true);
+
+    for (const Ptr<Graph>& g : allgraphs)
+        finalizeGraph(g, useOpenVINO);
+
+    finalized = true;
+}
+
 void Net::Impl::allocateLayerOutputs(
-                          const Ptr<Layer>& layer,
+                          const Ptr<OpData>& layer,
                           const std::vector<int>& inpTypes,
                           const std::vector<MatShape>& inpShapes,
                           std::vector<int>& outTypes,
@@ -680,6 +778,7 @@ void Net::Impl::forwardMainGraph(InputArrayOfArrays inputs, OutputArrayOfArrays 
     if (!mainGraph) {
         CV_Error(Error::StsNullPtr, "the model was not loaded");
     }
+    finalize();  // select per-op executors for the chosen backend/target (idempotent)
     // ************ uncomment one of the lines below for debugging **********
     //tracingMode = DNN_TRACE_OP;
     //tracingMode = DNN_TRACE_ALL;
@@ -1135,7 +1234,8 @@ void Net::Impl::forwardGraph(Ptr<Graph>& graph, InputArrayOfArrays inputs_,
         CV_Error_(Error::StsObjectNotFound, ("graph '%s' does not belong to the model", graph->name().c_str()));
     }
     std::ostream& strm_ = dump_strm ? *dump_strm : std::cout;
-    const std::vector<Ptr<Layer> >& prog = graph->prog();
+    GraphImpl* gimpl = static_cast<GraphImpl*>(graph.get());
+    const std::vector<Ptr<OpData> >& prog = graph->prog();
     size_t i, nops = prog.size();
     const std::vector<Arg>& gr_inputs = graph->inputs();
     const std::vector<Arg>& gr_outputs = graph->outputs();
@@ -1161,11 +1261,15 @@ void Net::Impl::forwardGraph(Ptr<Graph>& graph, InputArrayOfArrays inputs_,
     }
 
     for (size_t opidx = 0; opidx < nops; opidx++) {
-        const Ptr<Layer>& layer = prog.at(opidx);
-        if (!layer) // in theory we shouldn't have any 'nops' at this stage, but just in case we skip them.
+        const Ptr<OpData>& op = prog.at(opidx);
+        if (!op) // in theory we shouldn't have any 'nops' at this stage, but just in case we skip them.
             continue;
-        const std::vector<Arg>& inputs = layer->inputs;
-        const std::vector<Arg>& outputs = layer->outputs;
+        Ptr<Layer> layer = (opidx < gimpl->exec_.size()) ? gimpl->exec_[opidx] : Ptr<Layer>();
+        if (!layer)
+            layer = op.dynamicCast<Layer>();
+        CV_Assert(layer);
+        const std::vector<Arg>& inputs = op->inputs;
+        const std::vector<Arg>& outputs = op->outputs;
         size_t ninputs = inputs.size(), noutputs = outputs.size();
 
         inpMats.resize(ninputs);
@@ -1184,15 +1288,15 @@ void Net::Impl::forwardGraph(Ptr<Graph>& graph, InputArrayOfArrays inputs_,
 
         if (tracingMode != DNN_TRACE_NONE) {
             strm_ << "-----------\n";
-            strm_ << "'" << graph->name() << "' [" << opidx << "/" << nops << "]. " << layer->type << " node: " << layer->name << "\n";
+            strm_ << "'" << graph->name() << "' [" << opidx << "/" << nops << "]. " << op->type << " node: " << op->name << "\n";
             for (i = 0; i < ninputs; i++) {
                 Arg inp = inputs[i];
                 traceArg(strm_, "Input", i, inp, false);
             }
         }
-        bool dynamicOutShapes = layer->dynamicOutputShapes();
+        bool dynamicOutShapes = op->dynamicOutputShapes();
         if (!dynamicOutShapes) {
-            allocateLayerOutputs(layer, inpTypes, inpShapes, outTypes, outShapes, outOrigData, outMats,
+            allocateLayerOutputs(op, inpTypes, inpShapes, outTypes, outShapes, outOrigData, outMats,
                                  tempTypes, tempShapes, tempMats, scratchBufs, true);
         } else {
             outMats.resize(noutputs);
@@ -1205,7 +1309,7 @@ void Net::Impl::forwardGraph(Ptr<Graph>& graph, InputArrayOfArrays inputs_,
 
         timestamp = getTickCount();
 
-        std::vector<Ptr<Graph> >* subgraphs = layer->subgraphs();
+        std::vector<Ptr<Graph> >* subgraphs = op->subgraphs();
         if (!subgraphs) {
             if (finalizeLayers)
                 layer->finalize(inpMats, outMats);
@@ -1308,7 +1412,7 @@ void Net::Impl::forwardGraph(Ptr<Graph>& graph, InputArrayOfArrays inputs_,
             }
             else {
                 CV_Error_(Error::StsNotImplemented,
-                          ("unknown layer type '%s' with subgraphs", layer->type.c_str()));
+                          ("unknown layer type '%s' with subgraphs", op->type.c_str()));
             }
         }
         CV_Assert(outMats.size() == noutputs);
@@ -1397,8 +1501,8 @@ void Net::Impl::updateUseCounts(const Ptr<Graph>& graph, std::vector<int>& useco
         CV_Assert(output.idx < (int)usecounts.size());
         usecounts[output.idx]++;
     }
-    const std::vector<Ptr<Layer> >& prog = graph->prog();
-    for (const Ptr<Layer>& layer: prog) {
+    const std::vector<Ptr<OpData> >& prog = graph->prog();
+    for (const Ptr<OpData>& layer: prog) {
         const std::vector<Arg>& inputs = layer->inputs;
         for (const Arg& input: inputs) {
             CV_Assert(input.idx < (int)usecounts.size());
@@ -1429,14 +1533,14 @@ int Net::Impl::updateGraphOfs(const Ptr<Graph>& graph, int currofs, bool ismain)
         allgraphs.clear();
         layerNameToId.clear();
     }
-    const std::vector<Ptr<Layer> >& prog = graph->prog();
+    const std::vector<Ptr<OpData> >& prog = graph->prog();
     size_t i, nops = prog.size();
     int subgraph_ofs = currofs + (int)nops;
     std::string name = graph->name();
     graphofs.insert(std::make_pair(name, currofs));
     allgraphs.push_back(graph);
     for (i = 0; i < nops; i++) {
-        const Ptr<Layer>& layer = prog[i];
+        const Ptr<OpData>& layer = prog[i];
         layerNameToId.insert(std::make_pair(layer->name, currofs + (int)i));
         const std::vector<Ptr<Graph> >* subgraphs = layer->subgraphs();
         if (subgraphs) {
@@ -1583,12 +1687,12 @@ bool Net::Impl::tryInferGraphShapes(const Ptr<Graph>& graph,
     if (!graph)
         return true;
 
-    const std::vector<Ptr<Layer> >& prog = graph->prog();
+    const std::vector<Ptr<OpData> >& prog = graph->prog();
 
     std::vector<MatShape> inpShapes, outShapes, tempShapes;
     std::vector<int> inpTypes, outTypes, tempTypes;
 
-    for (const Ptr<Layer>& layer: prog) {
+    for (const Ptr<OpData>& layer: prog) {
         if (!layer)
             continue;
 
