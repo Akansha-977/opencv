@@ -10,6 +10,10 @@
 #include "opencv2/core/hal/intrin.hpp"
 #include <algorithm>
 #include <cstring>
+#include "../op_inf_engine.hpp"
+#ifdef HAVE_DNN_NGRAPH
+#include "../ie_ngraph.hpp"
+#endif
 
 namespace cv
 {
@@ -40,6 +44,102 @@ public:
         activationFunc = nullptr;
         addResidual = false;
     }
+
+    virtual bool supportBackend(int backendId) CV_OVERRIDE
+    {
+#ifdef HAVE_DNN_NGRAPH
+        if (backendId == DNN_BACKEND_INFERENCE_ENGINE_NGRAPH)
+            return ngraphSupported();
+#endif
+        return backendId == DNN_BACKEND_OPENCV;
+    }
+
+#ifdef HAVE_DNN_NGRAPH
+    bool ngraphSupported() const
+    {
+        if (origWeights.empty() || wshape0.dims != 4)
+            return false;
+        if (auto_pad != AUTO_PAD_NONE && auto_pad != AUTO_PAD_VALID)
+            return false;
+        if (activationFunc != nullptr || !activ.empty())
+            return false;  // generic (non-fast) activation not handled
+        if (fastActivation != FAST_ACTIV_NONE && fastActivation != FAST_ACTIV_RELU &&
+            fastActivation != FAST_ACTIV_LEAKY_RELU && fastActivation != FAST_ACTIV_CLIP)
+            return false;
+        return true;
+    }
+
+    virtual Ptr<BackendNode> initNgraph(const std::vector<Ptr<BackendWrapper> >& inputs,
+                                        const std::vector<Ptr<BackendNode> >& nodes) CV_OVERRIDE
+    {
+        CV_UNUSED(inputs);
+        ov::Output<ov::Node> input = nodes[0].dynamicCast<InfEngineNgraphNode>()->node;
+        const int Cout = wshape0[0];
+        const int nspatial = wshape0.dims - 2;
+
+        // Fold fused BatchNorm into the original NCHW filter (W *= scale per Cout; bias = fusedBias).
+        Mat filters = origWeights, biasMat = bias;
+        if (fusedBatchNorm) {
+            filters = origWeights.clone();
+            const size_t inner = filters.total() / (size_t)Cout;
+            const float* sc = fusedScale.ptr<float>();
+            float* wp = filters.ptr<float>();
+            for (int co = 0; co < Cout; co++)
+                for (size_t k = 0; k < inner; k++)
+                    wp[co * inner + k] *= sc[co];
+            biasMat = fusedBias;
+        }
+
+        ov::Strides ov_strides, ov_dilations;
+        ov::CoordinateDiff pads_begin, pads_end;
+        for (int i = 0; i < nspatial; i++) {
+            ov_strides.push_back(strides.empty() ? 1 : (size_t)strides[i]);
+            ov_dilations.push_back(dilations.empty() ? 1 : (size_t)dilations[i]);
+            pads_begin.push_back(pads.empty() ? 0 : (std::ptrdiff_t)pads[i]);
+            pads_end.push_back(pads.empty() ? 0 : (std::ptrdiff_t)pads[i + nspatial]);
+        }
+        auto pad_type = (auto_pad == AUTO_PAD_VALID) ? ov::op::PadType::VALID : ov::op::PadType::EXPLICIT;
+
+        std::shared_ptr<ov::Node> convNode;
+        if (ngroups != 1) {
+            std::vector<size_t> wsh = {(size_t)ngroups, (size_t)(Cout / ngroups), (size_t)wshape0[1]};
+            for (int i = 0; i < nspatial; i++) wsh.push_back((size_t)wshape0[2 + i]);
+            auto w = std::make_shared<ov::op::v0::Constant>(ov::element::f32, ov::Shape(wsh), filters.data);
+            convNode = std::make_shared<ov::op::v1::GroupConvolution>(input, w, ov_strides, pads_begin, pads_end, ov_dilations, pad_type);
+        } else {
+            std::vector<size_t> wsh = {(size_t)Cout, (size_t)wshape0[1]};
+            for (int i = 0; i < nspatial; i++) wsh.push_back((size_t)wshape0[2 + i]);
+            auto w = std::make_shared<ov::op::v0::Constant>(ov::element::f32, ov::Shape(wsh), filters.data);
+            convNode = std::make_shared<ov::op::v1::Convolution>(input, w, ov_strides, pads_begin, pads_end, ov_dilations, pad_type);
+        }
+
+        std::shared_ptr<ov::Node> result = convNode;
+        if (!biasMat.empty()) {
+            std::vector<size_t> bsh(nspatial + 2, 1);
+            bsh[1] = (size_t)Cout;
+            auto b = std::make_shared<ov::op::v0::Constant>(ov::element::f32, ov::Shape(bsh), biasMat.data);
+            result = std::make_shared<ov::op::v1::Add>(result, b);
+        }
+
+        if (addResidual) {
+            ov::Output<ov::Node> residual = nodes.back().dynamicCast<InfEngineNgraphNode>()->node;
+            result = std::make_shared<ov::op::v1::Add>(result, residual);
+        }
+
+        if (fastActivation == FAST_ACTIV_RELU) {
+            result = std::make_shared<ov::op::v0::Relu>(result);
+        } else if (fastActivation == FAST_ACTIV_LEAKY_RELU) {
+            float slope = activParams.empty() ? 0.f : activParams[0];
+            auto s = std::make_shared<ov::op::v0::Constant>(ov::element::f32, ov::Shape{1}, &slope);
+            result = std::make_shared<ov::op::v0::PRelu>(result, s);
+        } else if (fastActivation == FAST_ACTIV_CLIP) {
+            double lo = activParams.size() > 0 ? activParams[0] : 0.0;
+            double hi = activParams.size() > 1 ? activParams[1] : 6.0;
+            result = std::make_shared<ov::op::v0::Clamp>(result, lo, hi);
+        }
+        return Ptr<BackendNode>(new InfEngineNgraphNode(result));
+    }
+#endif  // HAVE_DNN_NGRAPH
 
     virtual std::ostream& dumpAttrs(std::ostream& strm, int indent) const CV_OVERRIDE
     {
@@ -115,6 +215,9 @@ public:
         int wtype = accuracy < 0 ? CV_32F : accuracy;
 
         wshape0 = weights_.shape();
+#ifdef HAVE_DNN_NGRAPH
+        weights_.convertTo(origWeights, CV_32F);  // keep original NCHW filter for the OpenVINO path
+#endif
         bool depthwise = ngroups == wshape0[0] && wshape0[1] == 1;
 
         if (depthwise) {
@@ -663,6 +766,7 @@ public:
     std::vector<int> emptyKernelShape;
     Ptr<Layer> activ, batchNorm;
     Mat weights, bias, fusedScale, fusedBias;
+    Mat origWeights;  // original NCHW filter (FP32), kept for the OpenVINO path
     MatShape wshape0, prevInpshape;
     ConvState cs;
     bool fusedBatchNorm;

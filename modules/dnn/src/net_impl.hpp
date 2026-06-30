@@ -143,6 +143,8 @@ struct Net::Impl : public detail::NetImplBase
     bool enableFP16, haveFP16;
     bool prepared; // need to rerun graph transformations/optimizations
     bool finalizeLayers; // need to initialize each layer
+    bool finalized = false; // executors have been selected for the current backend/target
+    bool openvinoFused_ = false;
     TracingMode tracingMode;
     ProfilingMode profilingMode;
     std::vector<int64_t> dimvalues;
@@ -420,12 +422,15 @@ struct Net::Impl : public detail::NetImplBase
     int findDim(const std::string& name, bool insert=false);
 
     void prepareForInference();
+    void finalize();
+    // Selects executors for a single graph (recursing into subgraphs).
+    void finalizeGraph(const Ptr<Graph>& graph, bool useOpenVINO);
 
     // pre-allocates memory for output tensors.
     // if useBufferPool==true, the method uses 'buffers'
     // for outputs (according to bufidxs)
     // instead of allocating fresh outputs
-    void allocateLayerOutputs(const Ptr<Layer>& layer,
+    void allocateLayerOutputs(const Ptr<OpData>& layer,
                               const std::vector<int>& inpTypes,
                               const std::vector<MatShape>& inpShapes,
                               std::vector<int>& outTypes,
@@ -495,6 +500,8 @@ struct Net::Impl : public detail::NetImplBase
     void assignBuffers();
     // fuse batch norm, add bias and activation to convolution
     void fuseBasic();
+    // group runs of OpenVINO-supported ops into single-ov::Model subgraph ops
+    void fuseOpenVINO();
     // fuse ViT-style multi-head attention subgraphs
     void fuseAttention();
     // rewrite MatMul(A, const_B [, const_bias]) into Gemm so projection-style
@@ -523,9 +530,9 @@ struct Net::Impl : public detail::NetImplBase
 
 };  // Net::Impl
 
-inline Net::Impl* getNetImpl(const Layer* layer)
+inline Net::Impl* getNetImpl(const OpData* op)
 {
-    return reinterpret_cast<Net::Impl*>(layer->netimpl);
+    return reinterpret_cast<Net::Impl*>(op->netimpl);
 }
 
 Net readNetFromONNX2(const String&);

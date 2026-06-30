@@ -7,6 +7,10 @@
 #include "../net_impl.hpp"
 #include "conv2_common.hpp"
 #include "opencv2/core/hal/intrin.hpp"
+#include "../op_inf_engine.hpp"
+#ifdef HAVE_DNN_NGRAPH
+#include "../ie_ngraph.hpp"
+#endif
 
 namespace cv
 {
@@ -473,8 +477,41 @@ public:
 
     virtual bool supportBackend(int backendId) CV_OVERRIDE
     {
+#ifdef HAVE_DNN_NGRAPH
+        if (backendId == DNN_BACKEND_INFERENCE_ENGINE_NGRAPH) {
+            if (kernel_shape.size() != 2 || outputs.size() != 1)
+                return false;
+            for (int d : dilations) if (d != 1) return false;
+            return auto_pad == AUTO_PAD_NONE || auto_pad == AUTO_PAD_VALID;
+        }
+#endif
         return backendId == DNN_BACKEND_OPENCV;
     }
+
+#ifdef HAVE_DNN_NGRAPH
+    virtual Ptr<BackendNode> initNgraph(const std::vector<Ptr<BackendWrapper> >& inputs,
+                                        const std::vector<Ptr<BackendNode> >& nodes) CV_OVERRIDE
+    {
+        CV_UNUSED(inputs);
+        ov::Output<ov::Node> ieInpNode = nodes[0].dynamicCast<InfEngineNgraphNode>()->node;
+        const int nspatial = (int)kernel_shape.size();
+
+        std::vector<size_t> kernel(kernel_shape.begin(), kernel_shape.end());
+        std::vector<size_t> ov_strides(nspatial), pads_begin(nspatial), pads_end(nspatial);
+        for (int i = 0; i < nspatial; i++) {
+            ov_strides[i] = strides.empty() ? 1 : (size_t)strides[i];
+            pads_begin[i] = pads.empty() ? 0 : (size_t)pads[i];
+            pads_end[i]   = pads.empty() ? 0 : (size_t)pads[i + nspatial];
+        }
+        auto rounding = ceil_mode ? ov::op::RoundingType::CEIL : ov::op::RoundingType::FLOOR;
+        auto pad_type = (auto_pad == AUTO_PAD_VALID) ? ov::op::PadType::VALID : ov::op::PadType::EXPLICIT;
+
+        auto max_pool = std::make_shared<ov::op::v1::MaxPool>(
+            ieInpNode, ov::Strides(ov_strides), ov::Shape(pads_begin), ov::Shape(pads_end),
+            ov::Shape(kernel), rounding, pad_type);
+        return Ptr<BackendNode>(new InfEngineNgraphNode(max_pool));
+    }
+#endif  // HAVE_DNN_NGRAPH
 
     virtual int64_t getFLOPS(const std::vector<MatShape> &inputs,
                            const std::vector<MatShape> &outputs) const CV_OVERRIDE
