@@ -2733,6 +2733,8 @@ TEST_P(Test_ONNX_nets, LResNet100E_IR)
 #endif
         CV_TEST_TAG_DEBUG_VERYLONG
     );
+    // New dnn engine cannot parse this model (PReLU slope produced by a Reshape of constants).
+    applyTestTag(CV_TEST_TAG_DNN_SKIP_PARSER);
     if (backend == DNN_BACKEND_INFERENCE_ENGINE_NN_BUILDER_2019)
     {
         if (target == DNN_TARGET_OPENCL_FP16) applyTestTag(CV_TEST_TAG_DNN_SKIP_IE_OPENCL_FP16, CV_TEST_TAG_DNN_SKIP_IE_NN_BUILDER);
