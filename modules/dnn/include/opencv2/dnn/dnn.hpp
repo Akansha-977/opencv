@@ -847,7 +847,11 @@ CV__DNN_INLINE_NS_BEGIN
          *  @see Layer::blobs
          */
         CV_WRAP Mat getParam(int layer, int numParam = 0) const;
-        CV_WRAP inline Mat getParam(const String& layerName, int numParam = 0) const { return getParam(getLayerId(layerName), numParam); }
+        /** @brief Returns the parameter blob of a layer identified by its name or output tensor name.
+         *  @param layerName raw ONNX output tensor name (ENGINE_NEW).
+         *  @param numParam index of the constant weight input (0 = kernel, 1 = bias, etc.).
+         */
+        CV_WRAP Mat getParam(const String& layerName, int numParam = 0) const;
 
         /** @brief Returns indexes of layers with unconnected outputs.
          *

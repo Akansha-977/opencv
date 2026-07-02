@@ -172,6 +172,12 @@ Mat Net::getParam(int layer, int numParam) const
     return impl->getParam(layer, numParam);
 }
 
+Mat Net::getParam(const String& name, int numParam) const
+{
+    CV_Assert(impl);
+    return impl->getParam(name, numParam);
+}
+
 void Net::setParam(int layer, int numParam, const Mat& blob)
 {
     CV_Assert(impl);

@@ -157,6 +157,8 @@ protected:
                   int max_inputs = std::numeric_limits<int>::max());
     void setParamsDtype(LayerParams& layerParams, const opencv_onnx::NodeProto& node_proto);
 
+    Mat foldConstArg(const Arg& arg);
+
     void raiseError() {
         have_errors = true;
     }
@@ -1438,12 +1440,60 @@ void ONNXImporter2::parseAbs(LayerParams& layerParams, const opencv_onnx::NodePr
     addLayer(layerParams, node_proto);
 }
 
+Mat ONNXImporter2::foldConstArg(const Arg& arg)
+{
+    if (net.isConstArg(arg))
+        return netimpl->argTensor(arg);
+
+    Ptr<Layer> producer;
+    for (const Ptr<Layer>& layer : curr_prog) {
+        for (const Arg& o : layer->outputs) {
+            if (o.idx == arg.idx) { producer = layer; break; }
+        }
+        if (producer) break;
+    }
+    if (!producer)
+        return Mat();
+
+    // Fold only if every input is constant (same mechanism as Net::Impl::constFold()).
+    const std::vector<Arg>& inputs = producer->inputs;
+    const std::vector<Arg>& outputs = producer->outputs;
+    size_t ninputs = inputs.size(), noutputs = outputs.size();
+    std::vector<Mat> inpMats(ninputs);
+    std::vector<int> inpTypes(ninputs);
+    std::vector<MatShape> inpShapes(ninputs);
+    for (size_t j = 0; j < ninputs; j++) {
+        if (!net.isConstArg(inputs[j]))
+            return Mat();
+        const Mat& m = netimpl->argTensor(inputs[j]);
+        inpMats[j] = m; inpTypes[j] = m.type(); inpShapes[j] = m.shape();
+    }
+
+    std::vector<Mat> outMats(noutputs), tempMats, globalTemps;
+    std::vector<int> outTypes, tempTypes;
+    std::vector<MatShape> outShapes, tempShapes;
+    std::vector<std::pair<uchar*, size_t> > outOrigData;
+    if (!producer->dynamicOutputShapes())
+        netimpl->allocateLayerOutputs(producer, inpTypes, inpShapes, outTypes, outShapes,
+                                      outOrigData, outMats, tempTypes, tempShapes, tempMats,
+                                      globalTemps, false);
+    producer->finalize(inpMats, outMats);
+    producer->forward(inpMats, outMats, tempMats);
+
+    for (size_t j = 0; j < noutputs; j++)
+        if (outputs[j].idx == arg.idx)
+            return outMats[j];
+    return Mat();
+}
+
 void ONNXImporter2::parsePRelu(LayerParams& layerParams, const opencv_onnx::NodeProto& node_proto)
 {
     layerParams.type = "PReLU";
     CV_Assert(node_inputs.size() == 2);
-    CV_Assert(net.isConstArg(node_inputs[1]));
-    layerParams.blobs.push_back(net.argTensor(node_inputs[1]));
+    // Slope may be a constant behind a shape op (e.g. Reshape); fold it to a constant.
+    Mat slope = foldConstArg(node_inputs[1]);
+    CV_Assert(!slope.empty());
+    layerParams.blobs.push_back(slope);
     addLayer(layerParams, node_proto, 1);
 }
 
