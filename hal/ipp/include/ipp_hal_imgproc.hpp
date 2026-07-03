@@ -16,6 +16,9 @@
 // Too big difference compared to OpenCV FFT-based convolution, different results on masks > 7x7
 #define IPP_DISABLE_FILTER2D_BIG_MASK 1
 
+// IPP medianBlur integration is disabled in main OpenCV; kept behind a macro like box filter
+#define DISABLE_IPP_MEDIAN_BLUR 1
+
 #if IPP_VERSION_X100 >= 810
 #if defined(HAVE_IPP_IW)
 int ipp_hal_warpAffine(int src_type, const uchar *src_data, size_t src_step, int src_width, int src_height, uchar *dst_data, size_t dst_step, int dst_width,
@@ -85,6 +88,14 @@ int ipp_hal_filter2D(const uchar * src_data, size_t src_step, int src_type,
 #undef cv_hal_filter_stateless
 #define cv_hal_filter_stateless ipp_hal_filter2D
 #endif // defined(HAVE_IPP_IW) && !DISABLE_IPP_FILTER2D
+
+#if !DISABLE_IPP_MEDIAN_BLUR
+int ipp_hal_medianBlur(const uchar* src_data, size_t src_step,
+                       uchar* dst_data, size_t dst_step,
+                       int width, int height, int depth, int cn, int ksize);
+#undef cv_hal_medianBlur
+#define cv_hal_medianBlur ipp_hal_medianBlur
+#endif // !DISABLE_IPP_MEDIAN_BLUR
 
 #endif //IPP_VERSION_X100 >= 810
 
