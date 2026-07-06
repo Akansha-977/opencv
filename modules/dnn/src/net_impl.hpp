@@ -234,8 +234,11 @@ struct Net::Impl : public detail::NetImplBase
     void setInputShape(const String& inputName, const MatShape& shape);
     virtual void setInput(InputArray blob, const String& name, double scalefactor, const Scalar& mean);
     Mat getParam(int layer, int numParam) const;
+    Mat getParam(const std::string& outputTensorName, int numParam) const;
+    Ptr<Layer> getGraphLayerForParam(const std::string& name) const;
     void setParam(int layer, int numParam, const Mat& blob);
     void setParam(const std::string& outputTensorName, int numParam, const Mat& blob);
+    void setParamGraph(const std::string& outputTensorName, int numParam, const Mat& blob);
     std::vector<Ptr<Layer>> getLayerInputs(int layerId) const;
     std::vector<String> getLayerNames() const;
 
@@ -319,6 +322,8 @@ struct Net::Impl : public detail::NetImplBase
     void forward(OutputArrayOfArrays outputBlobs,
             const std::vector<String>& outBlobNames);
     void forward(std::vector<std::vector<Mat>>& outputBlobs,
+            const std::vector<String>& outBlobNames);
+    void forwardAndRetrieveGraph(std::vector<std::vector<Mat>>& outputBlobs,
             const std::vector<String>& outBlobNames);
 
 

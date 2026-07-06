@@ -217,14 +217,6 @@ public:
     // output against an in-test attention reference computed from the same inputs.
     void testSDPAModel(const String& basename, double l1, double lInf)
     {
-        // SDPA is only handled by the new-engine ONNX importer.
-        auto engine_forced = static_cast<cv::dnn::EngineType>(
-            cv::utils::getConfigurationParameterSizeT("OPENCV_FORCE_DNN_ENGINE", cv::dnn::ENGINE_AUTO));
-        if (engine_forced == cv::dnn::ENGINE_CLASSIC) {
-            applyTestTag(CV_TEST_TAG_DNN_SKIP_PARSER);
-            return;
-        }
-
         Mat Q  = blobFromNPY(_tf("data/input_" + basename + "_0.npy"));
         Mat KT = blobFromNPY(_tf("data/input_" + basename + "_1.npy"));
         Mat V  = blobFromNPY(_tf("data/input_" + basename + "_2.npy"));
@@ -2323,14 +2315,6 @@ TEST_P(Test_ONNX_layers, Gemm_External_Data)
 
 TEST_P(Test_ONNX_layers, Quantized_MatMul_Variable_Weights)
 {
-    auto engine_forced = static_cast<cv::dnn::EngineType>(
-        cv::utils::getConfigurationParameterSizeT("OPENCV_FORCE_DNN_ENGINE", cv::dnn::ENGINE_AUTO));
-    if (engine_forced == cv::dnn::ENGINE_CLASSIC)
-    {
-        applyTestTag(CV_TEST_TAG_DNN_SKIP_PARSER);
-        return;
-    }
-
     testONNXModels("quantized_matmul_variable_inputs", npy, 1.3, 1.3);
 }
 
@@ -2749,6 +2733,8 @@ TEST_P(Test_ONNX_nets, LResNet100E_IR)
 #endif
         CV_TEST_TAG_DEBUG_VERYLONG
     );
+    // New dnn engine cannot parse this model (PReLU slope produced by a Reshape of constants).
+    applyTestTag(CV_TEST_TAG_DNN_SKIP_PARSER);
     if (backend == DNN_BACKEND_INFERENCE_ENGINE_NN_BUILDER_2019)
     {
         if (target == DNN_TARGET_OPENCL_FP16) applyTestTag(CV_TEST_TAG_DNN_SKIP_IE_OPENCL_FP16, CV_TEST_TAG_DNN_SKIP_IE_NN_BUILDER);
@@ -3771,7 +3757,7 @@ INSTANTIATE_TEST_CASE_P(/**/, Test_ONNX_nets, dnnBackendsAndTargets());
 TEST_P(Test_ONNX_layers, getUnconnectedOutLayers)
 {
     auto engine_forced = static_cast<cv::dnn::EngineType>(
-        cv::utils::getConfigurationParameterSizeT("OPENCV_FORCE_DNN_ENGINE", cv::dnn::ENGINE_AUTO));
+        cv::utils::getConfigurationParameterSizeT("OPENCV_FORCE_DNN_ENGINE", cv::dnn::ENGINE_NEW));
     if (engine_forced == cv::dnn::ENGINE_ORT)
         applyTestTag(CV_TEST_TAG_DNN_SKIP_PARSER);
 

@@ -700,6 +700,23 @@ void Net::Impl::forwardMainGraph(InputArrayOfArrays inputs, OutputArrayOfArrays 
         kvCacheManager.applyRoutes();
 }
 
+// Assign one blob, handling vector outputs (list/tuple from bindings) and plain Mat/UMat.
+static void assignSingleOutputBlob(OutputArrayOfArrays outputBlobs, const Mat& result)
+{
+    _InputArray::KindFlag k = outputBlobs.kind();
+    if (k == _InputArray::STD_VECTOR_MAT) {
+        std::vector<Mat>& v = outputBlobs.getMatVecRef();
+        v.resize(1);
+        result.copyTo(v[0]);
+    } else if (k == _InputArray::STD_VECTOR_UMAT) {
+        std::vector<UMat>& v = outputBlobs.getUMatVecRef();
+        v.resize(1);
+        result.copyTo(v[0]);
+    } else {
+        outputBlobs.assign(result);
+    }
+}
+
 void Net::Impl::forwardWithSingleOutput(const std::string& outname, OutputArrayOfArrays outputBlobs)
 {
 #ifdef HAVE_ONNXRUNTIME
@@ -754,7 +771,7 @@ void Net::Impl::forwardWithSingleOutput(const std::string& outname, OutputArrayO
             const std::vector<Arg>& gr_outputs = mainGraph->outputs();
             for (size_t i = 0; i < gr_outputs.size(); i++) {
                 if (gr_outputs[i].idx == targetArg.idx) {
-                    outputBlobs.assign(outs[i]);
+                    assignSingleOutputBlob(outputBlobs, outs[i]);
                     return;
                 }
             }
@@ -771,9 +788,9 @@ void Net::Impl::forwardWithSingleOutput(const std::string& outname, OutputArrayO
             if (result.shape().layout == DATA_LAYOUT_BLOCK) {
                 Mat converted;
                 transformLayout(result, converted, originalLayout, originalLayout, defaultC0);
-                outputBlobs.assign(converted);
+                assignSingleOutputBlob(outputBlobs, converted);
             } else {
-                outputBlobs.assign(result.clone());
+                assignSingleOutputBlob(outputBlobs, result.clone());
             }
             return;
         }
@@ -782,7 +799,7 @@ void Net::Impl::forwardWithSingleOutput(const std::string& outname, OutputArrayO
     std::vector<Mat> inps, outs;
     forwardMainGraph(inps, outs);
     CV_Assert(!outs.empty());
-    outputBlobs.assign(outs[0]);
+    assignSingleOutputBlob(outputBlobs, outs[0]);
 }
 
 void Net::Impl::forwardWithMultipleOutputs(OutputArrayOfArrays outblobs, const std::vector<std::string>& outnames)
@@ -859,45 +876,44 @@ void Net::Impl::forwardWithMultipleOutputs(OutputArrayOfArrays outblobs, const s
     const std::vector<Arg>& outargs = mainGraph->outputs();
     std::vector<int> outidxs;
     int i, j, noutputs = (int)outargs.size();
-    if (!outnames.empty()) {
-        CV_CheckEQ((int)outnames.size(), noutputs, "the number of requested and actual outputs must be the same");
-        if (noutputs == 1 && outnames[0].empty())
-            ;
-        else {
-            for (i = 0; i < noutputs; i++) {
-                const std::string& outname = outnames[i];
-                for (j = 0; j < noutputs; j++) {
-                    const ArgData& adata = args.at(outargs[j].idx);
-                    if (adata.name == outname) {
-                        outidxs.push_back((int)j);
-                        break;
-                    }
+    if (outnames.empty() || (noutputs == 1 && outnames.size() == 1 && outnames[0].empty())) {
+        for (i = 0; i < noutputs; i++)
+            outidxs.push_back(i);
+    } else {
+        for (i = 0; i < (int)outnames.size(); i++) {
+            const std::string& outname = outnames[i];
+            for (j = 0; j < noutputs; j++) {
+                const ArgData& adata = args.at(outargs[j].idx);
+                if (adata.name == outname) {
+                    outidxs.push_back((int)j);
+                    break;
                 }
-                if (j == noutputs) {
-                    CV_Error_(Error::StsObjectNotFound, ("the required output '%s' is not found", outname.c_str()));
-                }
+            }
+            if (j == noutputs) {
+                CV_Error_(Error::StsObjectNotFound, ("the required output '%s' is not found", outname.c_str()));
             }
         }
     }
     std::vector<Mat> inps={}, outs;
     forwardMainGraph(inps, outs);
     CV_Assert(outs.size() == noutputs);
+    int nout = (int)outidxs.size();
     std::vector<Mat>* outMats = nullptr;
     std::vector<UMat>* outUMats = nullptr;
     _InputArray::KindFlag outKind = outblobs.kind();
     if (outKind == _InputArray::STD_VECTOR_MAT) {
         outMats = &outblobs.getMatVecRef();
-        outMats->resize(noutputs);
+        outMats->resize(nout);
     } else if (outKind == _InputArray::STD_VECTOR_UMAT) {
         outUMats = &outblobs.getUMatVecRef();
-        outUMats->resize(noutputs);
+        outUMats->resize(nout);
     } else if (outKind == _InputArray::MAT || outKind == _InputArray::UMAT) {
-        CV_Assert(noutputs == 1);
+        CV_Assert(nout == 1);
     } else {
         CV_Error(Error::StsBadArg, "outputs must be Mat, UMat, a vector of Mat's or a vector of UMat's");
     }
-    for (i = 0; i < noutputs; i++) {
-        int j = outidxs.empty() ? i : outidxs[i];
+    for (i = 0; i < nout; i++) {
+        int j = outidxs[i];
         Mat src = outs[j];
         if (outMats) {
             src.copyTo(outMats->at(i));
@@ -907,6 +923,92 @@ void Net::Impl::forwardWithMultipleOutputs(OutputArrayOfArrays outblobs, const s
             src.copyTo(outblobs);
         }
     }
+}
+
+void Net::Impl::forwardAndRetrieveGraph(std::vector<std::vector<Mat>>& outputBlobs,
+                                        const std::vector<String>& outBlobNames)
+{
+    // New engine: one blob per output name, wrapped as a single-element list.
+    std::vector<Mat> outs;
+    forwardWithMultipleOutputs(outs, outBlobNames);
+    outputBlobs.resize(outs.size());
+    for (size_t i = 0; i < outs.size(); i++)
+        outputBlobs[i].assign(1, outs[i]);
+}
+
+// Resolve by layer name first, then by output tensor name.
+Ptr<Layer> Net::Impl::getGraphLayerForParam(const std::string& name) const
+{
+    for (const Ptr<Graph>& graph : allgraphs) {
+        if (graph.empty()) continue;
+        for (const Ptr<Layer>& layer : graph->prog())
+            if (layer->name == name)
+                return layer;
+    }
+    auto it = argnames.find(name);
+    if (it == argnames.end()) {
+        size_t excl = name.rfind('!');
+        if (excl != std::string::npos)
+            it = argnames.find(name.substr(excl + 1));
+    }
+    if (it != argnames.end()) {
+        int targetIdx = (int)it->second;
+        for (const Ptr<Graph>& graph : allgraphs) {
+            if (graph.empty()) continue;
+            for (const Ptr<Layer>& layer : graph->prog())
+                for (const Arg& out : layer->outputs)
+                    if (out.idx == targetIdx)
+                        return layer;
+        }
+    }
+    return Ptr<Layer>();
+}
+
+Mat Net::Impl::getParam(const std::string& outputTensorName, int numParam) const
+{
+    if (mainGraph) {
+        Ptr<Layer> layer = getGraphLayerForParam(outputTensorName);
+        if (!layer)
+            CV_Error_(Error::StsObjectNotFound,
+                      ("DNN: no layer or output tensor '%s' found in the graph", outputTensorName.c_str()));
+        if (numParam < (int)layer->blobs.size())
+            return layer->blobs[numParam];
+        CV_Error_(Error::StsOutOfRange,
+                  ("DNN: layer '%s' has fewer than %d params", outputTensorName.c_str(), numParam + 1));
+    }
+    return getParam(getLayerId(outputTensorName), numParam);
+}
+
+void Net::Impl::setParamGraph(const std::string& outputTensorName, int numParam, const Mat& blob)
+{
+    Ptr<Layer> layer = getGraphLayerForParam(outputTensorName);
+    if (!layer)
+        CV_Error_(Error::StsObjectNotFound,
+                  ("DNN: no layer or output tensor '%s' found in the graph", outputTensorName.c_str()));
+
+    if (numParam < (int)layer->blobs.size()) {
+        layer->blobs[numParam] = blob;
+        finalizeLayers = true;
+        return;
+    }
+
+    Conv2Layer* conv = dynamic_cast<Conv2Layer*>(layer.get());
+    if (conv && numParam == 0) {
+        conv->setWeights(blob, Mat(), defaultC0, accuracy);
+        finalizeLayers = true;
+        return;
+    }
+
+    ConvTranspose2Layer* deconv = dynamic_cast<ConvTranspose2Layer*>(layer.get());
+    if (deconv && numParam == 0) {
+        deconv->setWeights(blob, Mat(), defaultC0, accuracy);
+        finalizeLayers = true;
+        return;
+    }
+
+    CV_Error_(Error::StsOutOfRange,
+              ("DNN: layer '%s' has fewer than %d params",
+               outputTensorName.c_str(), numParam + 1));
 }
 
 /*void Net::Impl::checkAndUpdateDim(const Ptr<Graph>& g, const Ptr<Layer>& layer, Arg inp, int j, int value)
