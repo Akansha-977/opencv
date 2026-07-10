@@ -1,6 +1,8 @@
 // This file is part of OpenCV project.
 // It is subject to the license terms in the LICENSE file found in the top-level directory
 // of this distribution and at http://opencv.org/license.html
+// Copyright (C) 2026, BigVision LLC, all rights reserved.
+// Third party copyrights are property of their respective owners.
 
 #include "ipp_hal_imgproc.hpp"
 
@@ -27,9 +29,9 @@ int ipp_hal_integral(int depth, int sdepth, int sqdepth,
     {
         if (depth == CV_8U && sdepth == CV_32S)
             status = CV_INSTRUMENT_FUN_IPP(ippiIntegral_8u32s_C1R, (const Ipp8u*)src_data, (int)src_step, (Ipp32s*)sum_data, (int)sum_step, size, 0);
-        else if (depth == CV_8UC1 && sdepth == CV_32F)
+        else if (depth == CV_8U && sdepth == CV_32F)
             status = CV_INSTRUMENT_FUN_IPP(ippiIntegral_8u32f_C1R, (const Ipp8u*)src_data, (int)src_step, (Ipp32f*)sum_data, (int)sum_step, size, 0);
-        else if (depth == CV_32FC1 && sdepth == CV_32F)
+        else if (depth == CV_32F && sdepth == CV_32F)
             status = CV_INSTRUMENT_FUN_IPP(ippiIntegral_32f_C1R, (const Ipp32f*)src_data, (int)src_step, (Ipp32f*)sum_data, (int)sum_step, size);
         else
             return CV_HAL_ERROR_NOT_IMPLEMENTED;
