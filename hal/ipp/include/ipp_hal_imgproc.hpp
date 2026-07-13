@@ -174,6 +174,10 @@ int ipp_hal_cvtLabtoBGR(const uchar * src_data, size_t src_step, uchar * dst_dat
 #define cv_hal_cvtLabtoBGR ipp_hal_cvtLabtoBGR
 #endif // !IPP_DISABLE_LAB_RGB
 
+int ipp_hal_integral(int depth, int sdepth, int sqdepth, const uchar * src_data, size_t src_step, uchar * sum_data, size_t sum_step, uchar * sqsum_data, size_t sqsum_step, uchar * tilted_data, size_t tilted_step, int width, int height, int cn);
+#undef cv_hal_integral
+#define cv_hal_integral ipp_hal_integral
+
 #endif //IPP_VERSION_X100 >= 700
 
 #endif //__IPP_HAL_IMGPROC_HPP__
