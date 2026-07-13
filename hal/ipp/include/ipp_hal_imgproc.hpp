@@ -174,6 +174,32 @@ int ipp_hal_cvtLabtoBGR(const uchar * src_data, size_t src_step, uchar * dst_dat
 #define cv_hal_cvtLabtoBGR ipp_hal_cvtLabtoBGR
 #endif // !IPP_DISABLE_LAB_RGB
 
+int ipp_hal_accumulate(const uchar* src_data, size_t src_step, uchar* dst_data, size_t dst_step,
+                       const uchar* mask_data, size_t mask_step, int width, int height,
+                       int src_type, int dst_type);
+#undef cv_hal_accumulate
+#define cv_hal_accumulate ipp_hal_accumulate
+
+int ipp_hal_accumulateSquare(const uchar* src_data, size_t src_step, uchar* dst_data, size_t dst_step,
+                             const uchar* mask_data, size_t mask_step, int width, int height,
+                             int src_type, int dst_type);
+#undef cv_hal_accumulateSquare
+#define cv_hal_accumulateSquare ipp_hal_accumulateSquare
+
+int ipp_hal_accumulateProduct(const uchar* src1_data, size_t src1_step,
+                              const uchar* src2_data, size_t src2_step,
+                              uchar* dst_data, size_t dst_step,
+                              const uchar* mask_data, size_t mask_step, int width, int height,
+                              int src_type, int dst_type);
+#undef cv_hal_accumulateProduct
+#define cv_hal_accumulateProduct ipp_hal_accumulateProduct
+
+int ipp_hal_accumulateWeighted(const uchar* src_data, size_t src_step, uchar* dst_data, size_t dst_step,
+                               const uchar* mask_data, size_t mask_step, int width, int height,
+                               int src_type, int dst_type, double alpha);
+#undef cv_hal_accumulateWeighted
+#define cv_hal_accumulateWeighted ipp_hal_accumulateWeighted
+
 #endif //IPP_VERSION_X100 >= 700
 
 #endif //__IPP_HAL_IMGPROC_HPP__
