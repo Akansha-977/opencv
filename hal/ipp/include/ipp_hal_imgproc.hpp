@@ -15,6 +15,8 @@
 // Too big difference compared to OpenCV FFT-based convolution, different results on masks > 7x7
 #define IPP_DISABLE_FILTER2D_BIG_MASK 1
 
+#define DISABLE_IPP_MORPH 1
+
 #if IPP_VERSION_X100 >= 810
 
 #if defined(HAVE_IPP_IW)
@@ -89,6 +91,18 @@ int ipp_hal_filter2D(const uchar * src_data, size_t src_step, int src_type,
 #undef cv_hal_filter_stateless
 #define cv_hal_filter_stateless ipp_hal_filter2D
 #endif // defined(HAVE_IPP_IW) && !DISABLE_IPP_FILTER2D
+
+#if defined(HAVE_IPP_IW) && !DISABLE_IPP_MORPH
+int ipp_hal_morph_stateless(int operation, const uchar * src_data, size_t src_step, int src_type,
+                            uchar * dst_data, size_t dst_step, int dst_type,
+                            int width, int height, int src_full_width, int src_full_height, int src_roi_x, int src_roi_y,
+                            int dst_full_width, int dst_full_height, int dst_roi_x, int dst_roi_y,
+                            const uchar * kernel_data, size_t kernel_step, int kernel_type, int kernel_width, int kernel_height,
+                            int anchor_x, int anchor_y, int borderType, const double borderValue[4],
+                            int iterations, bool allowSubmatrix, bool allowInplace);
+#undef cv_hal_morph_stateless
+#define cv_hal_morph_stateless ipp_hal_morph_stateless
+#endif // defined(HAVE_IPP_IW) && !DISABLE_IPP_MORPH
 
 #endif //IPP_VERSION_X100 >= 810
 
