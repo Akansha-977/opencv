@@ -86,6 +86,15 @@ int ipp_hal_filter2D(const uchar * src_data, size_t src_step, int src_type,
 #define cv_hal_filter_stateless ipp_hal_filter2D
 #endif // defined(HAVE_IPP_IW) && !DISABLE_IPP_FILTER2D
 
+#if defined(HAVE_IPP_IW) && defined(ENABLE_IPP_GAUSSIAN_BLUR)
+int ipp_hal_gaussianBlur(const uchar* src_data, size_t src_step, uchar* dst_data, size_t dst_step,
+                         int width, int height, int depth, int cn,
+                         size_t margin_left, size_t margin_top, size_t margin_right, size_t margin_bottom,
+                         size_t ksize_width, size_t ksize_height, double sigmaX, double sigmaY, int border_type);
+#undef cv_hal_gaussianBlur
+#define cv_hal_gaussianBlur ipp_hal_gaussianBlur
+#endif // defined(HAVE_IPP_IW) && defined(ENABLE_IPP_GAUSSIAN_BLUR)
+
 #endif //IPP_VERSION_X100 >= 810
 
 #if IPP_VERSION_X100 >= 700
