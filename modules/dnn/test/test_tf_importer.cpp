@@ -27,30 +27,6 @@ static std::string _tf(TString filename)
     return (getOpenCVExtraDir() + "/dnn/") + filename;
 }
 
-TEST(Test_TensorFlow, read_inception)
-{
-    Net net;
-    {
-        const string model = findDataFile("dnn/tensorflow_inception_graph.pb", false);
-        net = readNetFromTensorflow(model);
-        ASSERT_FALSE(net.empty());
-    }
-    net.setPreferableBackend(DNN_BACKEND_OPENCV);
-
-    Mat sample = imread(_tf("grace_hopper_227.png"));
-    ASSERT_TRUE(!sample.empty());
-    Mat input;
-    resize(sample, input, Size(224, 224));
-    input -= Scalar::all(117); // mean sub
-
-    Mat inputBlob = blobFromImage(input);
-
-    net.setInput(inputBlob, "input");
-    Mat out = net.forward();
-
-    std::cout << out.dims << std::endl;
-}
-
 TEST(Test_TensorFlow, inception_accuracy)
 {
     Net net;
@@ -1813,7 +1789,7 @@ TEST_P(Test_TensorFlow_nets, Mask_RCNN)
     outNames[0] = "detection_out_final";
     outNames[1] = "detection_masks";
 
-    Net net = readNetFromTensorflow(model, proto, ENGINE_AUTO, outNames);
+    Net net = readNetFromTensorflow(model, proto, ENGINE_OPENCV, outNames);
     Mat refDetections = blobFromNPY(path("mask_rcnn_inception_v2_coco_2018_01_28.detection_out.npy"));
     Mat refMasks = blobFromNPY(path("mask_rcnn_inception_v2_coco_2018_01_28.detection_masks.npy"));
     Mat blob = blobFromImage(img, 1.0f, Size(800, 800), Scalar(), true, false);

@@ -753,6 +753,57 @@ public:
     CV_WRAP virtual String getDefaultName() const CV_OVERRIDE;
 };
 
+/** @brief XFeat feature detector and descriptor, based on a DNN model.
+
+XFeat is a compact learned local-feature extractor. This class wraps an ONNX export through
+cv::dnn::Net and exposes score-map detections with 64-D float descriptors under the standard
+cv::Feature2D interface.
+
+The class assumes the ONNX model has a single grayscale input tensor N×1×H×W in [0, 1] and
+returns descriptor and score maps. The descriptor map must have 64 channels, and the keypoint
+logit map must have either 64 channels (no extra class) or 65 channels, where the last channel
+is treated as a dustbin/background class used only in softmax normalization. Images are resized
+with preserved aspect ratio and padded to the configured network input size.
+ */
+class CV_EXPORTS_W XFeat : public Feature2D
+{
+public:
+    /** @brief Creates an XFeat detector.
+    @param modelPath Path to the XFeat ONNX model.
+    @param maxKeypoints Maximum number of keypoints to return per image. The strongest
+                        responses are kept; -1 keeps all detections.
+    @param scoreThreshold Discard keypoints with network score not greater than this value.
+    @param inputSize Input size fed to the network, default Size(640, 640).
+    @param backendId DNN backend identifier (see cv::dnn::Backend); 0 = DNN_BACKEND_DEFAULT.
+    @param targetId  DNN target identifier (see cv::dnn::Target);  0 = DNN_TARGET_CPU.
+    */
+    CV_WRAP static Ptr<XFeat> create(const String& modelPath,
+                                     int maxKeypoints = -1,
+                                     float scoreThreshold = 0.5f,
+                                     const Size& inputSize = Size(640, 640),
+                                     int backendId = 0,
+                                     int targetId = 0);
+
+    /** @brief Creates an XFeat detector from an in-memory model buffer. */
+    CV_WRAP_AS(createFromMemory) static Ptr<XFeat> create(const std::vector<uchar>& bufferModel,
+                                     int maxKeypoints = -1,
+                                     float scoreThreshold = 0.5f,
+                                     const Size& inputSize = Size(640, 640),
+                                     int backendId = 0,
+                                     int targetId = 0);
+
+    CV_WRAP virtual void setMaxKeypoints(int maxKeypoints) = 0;
+    CV_WRAP virtual int  getMaxKeypoints() const = 0;
+
+    CV_WRAP virtual void  setScoreThreshold(float threshold) = 0;
+    CV_WRAP virtual float getScoreThreshold() const = 0;
+
+    CV_WRAP virtual void setInputSize(const Size& inputSize) = 0;
+    CV_WRAP virtual Size getInputSize() const = 0;
+
+    CV_WRAP virtual String getDefaultName() const CV_OVERRIDE;
+};
+
 #endif // HAVE_OPENCV_DNN || CV_DOXYGEN
 
 /** @brief Class for extracting blobs from an image. :
@@ -859,7 +910,7 @@ public:
         CV_WRAP Params();
         CV_PROP_RW Size inputSize;              //!< Input image size for the network, default 640x640
         CV_PROP_RW bool normalizeDescriptors;   //!< Whether to L2-normalize descriptors, default true
-        CV_PROP_RW int engine;                  //!< DNN engine type (dnn::EngineType), default ENGINE_NEW
+        CV_PROP_RW int engine;                  //!< DNN engine type (dnn::EngineType), default ENGINE_AUTO
         CV_PROP_RW int backend;                 //!< DNN backend, default DNN_BACKEND_DEFAULT
         CV_PROP_RW int target;                  //!< DNN target, default DNN_TARGET_CPU
     };
@@ -997,6 +1048,19 @@ public:
     /** @brief Returns true if the descriptor matcher supports masking permissible matches.
      */
     CV_WRAP virtual bool isMaskSupported() const = 0;
+
+    /** @brief Provides keypoint and image-size context for matchers that need it (e.g. LightGlueMatcher).
+
+    Must be called before match()/knnMatch()/radiusMatch() for matchers that require this context.
+    Matchers that don't need it (e.g. BFMatcher, FlannBasedMatcher) ignore the call.
+
+    @param queryKpts Query image keypoints.
+    @param trainKpts Train image keypoints.
+    @param queryImageSize Size of the query image (width, height).
+    @param trainImageSize Size of the train image (width, height).
+    */
+    CV_WRAP virtual void setImagePairInfo(const std::vector<KeyPoint>& queryKpts, const std::vector<KeyPoint>& trainKpts,
+                                          Size queryImageSize = Size(), Size trainImageSize = Size());
 
     /** @brief Trains a descriptor matcher
 
@@ -1349,6 +1413,10 @@ public:
     /** @brief Clears stored pair context information.
     */
     CV_WRAP virtual void clearPairInfo() = 0;
+
+    /** @brief Convenience overload of setPairInfo() taking keypoints directly. */
+    CV_WRAP void setImagePairInfo(const std::vector<KeyPoint>& queryKpts, const std::vector<KeyPoint>& trainKpts,
+                                  Size queryImageSize = Size(), Size trainImageSize = Size()) CV_OVERRIDE;
 };
 
 //! @} features_match

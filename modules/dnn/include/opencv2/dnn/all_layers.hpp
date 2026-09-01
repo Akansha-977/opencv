@@ -375,6 +375,8 @@ CV__DNN_INLINE_NS_BEGIN
         virtual bool fuseBatchNorm(const Ptr<Layer>& bn) = 0;
         virtual bool fuseActivation(const Ptr<Layer>& activ) = 0;
         virtual bool fuseAddResidual(Arg residual) = 0;
+        // Folds a trailing scalar multiply into the pre-activation scale/bias; requires scale >= 0 and act(x)*s == act(x*s).
+        virtual bool fuseTrailingScale(InputArray scale) = 0;
 
         std::vector<int> strides, dilations, pads;
         int ngroups;
@@ -858,6 +860,28 @@ CV__DNN_INLINE_NS_BEGIN
         static Ptr<LoopLayer> create(const LayerParams& params);
     };
 
+    class CV_EXPORTS ScanLayer : public Layer
+    {
+    public:
+        /** Number of trailing inputs that are scanned (the rest are loop-carried state). */
+        virtual int numScanInputs() const = 0;
+        /** Per-scan-input axis to iterate over (empty => 0 for all). */
+        virtual const std::vector<int>& scanInputAxes() const = 0;
+        /** Per-scan-output axis to stack along (empty => 0 for all). */
+        virtual const std::vector<int>& scanOutputAxes() const = 0;
+        /** Per-scan-input direction, 1 = reverse (empty => forward for all). */
+        virtual const std::vector<int>& scanInputDirections() const = 0;
+        /** Per-scan-output direction, 1 = reverse (empty => forward for all). */
+        virtual const std::vector<int>& scanOutputDirections() const = 0;
+        /** ONNX-declared rank of each body scan output (-1 if unknown). A declared rank of
+         *  0 (scalar) marks an output that OpenCV stores as [1] but must stack into a rank-1
+         *  tensor, not [T, 1]. Empty => unknown for all. */
+        virtual const std::vector<int>& scanOutputRanks() const = 0;
+
+        /** Factory: creates a ScanLayer implementation. */
+        static Ptr<ScanLayer> create(const LayerParams& params);
+    };
+
     class CV_EXPORTS ConcatLayer : public Layer
     {
     public:
@@ -1101,6 +1125,8 @@ CV__DNN_INLINE_NS_BEGIN
     {
     public:
         static Ptr<Layer> create(const LayerParams& params);
+        // Set the per-channel slope when it arrives as a second input, not a blob.
+        virtual void setSlope(const Mat& /*slope*/) {}
     };
 
     class CV_EXPORTS ELULayer : public ActivationLayer
@@ -1677,6 +1703,13 @@ CV__DNN_INLINE_NS_BEGIN
         static Ptr<DetLayer> create(const LayerParams &params);
     };
 
+    /** @brief ONNX Dropout in eval mode: passes input through, mask output is all-true. */
+    class CV_EXPORTS DropoutMaskLayer : public Layer
+    {
+    public:
+        static Ptr<DropoutMaskLayer> create(const LayerParams &params);
+    };
+
     class CV_EXPORTS EyeLikeLayer : public Layer
     {
     public:
@@ -1848,6 +1881,17 @@ CV__DNN_INLINE_NS_BEGIN
         static Ptr<MatMulLayer> create(const LayerParams &params);
     };
 
+    // com.microsoft MatMulNBits: weights stay n-bit packed, dequantized per block during the GEMM
+    class CV_EXPORTS MatMulNBitsLayer : public Layer {
+     public:
+        int K;
+        int N;
+        int bits;
+        int block_size;
+
+        static Ptr<MatMulNBitsLayer> create(const LayerParams &params);
+    };
+
     struct MatMulInt8Params
     {
         String name;
@@ -1890,6 +1934,12 @@ CV__DNN_INLINE_NS_BEGIN
         static Ptr<NonZeroLayer> create(const LayerParams& params);
     };
 
+    class CV_EXPORTS ImageDecoderLayer : public Layer
+    {
+    public:
+        static Ptr<ImageDecoderLayer> create(const LayerParams& params);
+    };
+
     class CV_EXPORTS InstanceNormLayer : public Layer {
     public:
         float epsilon;
@@ -1918,6 +1968,31 @@ CV__DNN_INLINE_NS_BEGIN
         int kv_num_heads;
 
         static Ptr<AttentionOnnxAiLayer> create(const LayerParams &params);
+    };
+
+    class CV_EXPORTS CausalConvWithStateLayer : public Layer {
+     public:
+        static Ptr<CausalConvWithStateLayer> create(const LayerParams &params);
+    };
+
+    class CV_EXPORTS CumProdLayer : public Layer {
+        public:
+        static Ptr<CumProdLayer> create(const LayerParams &params);
+    };
+
+    class CV_EXPORTS BitCastLayer : public Layer {
+     public:
+        static Ptr<BitCastLayer> create(const LayerParams &params);
+    };
+
+    class CV_EXPORTS LinearAttentionLayer : public Layer {
+     public:
+        static Ptr<LinearAttentionLayer> create(const LayerParams &params);
+    };
+
+    class CV_EXPORTS FlexAttentionLayer : public Layer {
+     public:
+        static Ptr<FlexAttentionLayer> create(const LayerParams &params);
     };
 
     class CV_EXPORTS GroupNormLayer : public Layer {

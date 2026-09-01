@@ -52,6 +52,8 @@ bool constC(LayerGemmOpMode mode){
 // Y = alpha * A’ * B’ + beta * C
 class GemmLayerImpl CV_FINAL : public GemmLayer {
 public:
+    mutable int inpType = -1;
+
     GemmLayerImpl(const LayerParams& params) {
         setParamsFrom(params);
 
@@ -67,14 +69,37 @@ public:
         have_bias =  params.get<bool>("have_bias", false);
 
         real_ndims_C = params.get<int>("real_ndims_C", -1);
+
+        for (Mat& blob : blobs) {
+            if (blob.type() == CV_16F || blob.type() == CV_16BF) {
+                Mat widened;
+                blob.convertTo(widened, CV_32F);
+                blob = widened;
+            }
+        }
     }
 
     virtual bool supportBackend(int backendId) CV_OVERRIDE {
         return backendId == DNN_BACKEND_OPENCV ||
-               (backendId == DNN_BACKEND_CUDA && const_B && !trans_a) ||
+               (backendId == DNN_BACKEND_CUDA && const_B && !trans_a && inpType == CV_32F) ||
                backendId == DNN_BACKEND_CANN ||
                backendId == DNN_BACKEND_INFERENCE_ENGINE_NGRAPH ||
                (backendId == DNN_BACKEND_VKCOM && haveVulkan() && !have_bias && !trans_a);
+    }
+
+    virtual void getTypes(const std::vector<MatType>& inputs,
+                          const int requiredOutputs,
+                          const int requiredInternals,
+                          std::vector<MatType>& outputs,
+                          std::vector<MatType>& internals) const CV_OVERRIDE
+    {
+        CV_Assert(inputs.size());
+        for (auto input : inputs)
+            CV_CheckType(input, input == CV_32F || input == CV_64F, "");
+
+        inpType = inputs[0];
+        outputs.assign(requiredOutputs, inputs[0]);
+        internals.assign(requiredInternals, inputs[0]);
     }
 
 
@@ -252,6 +277,11 @@ public:
         opt.init();
         std::vector<Mat> inputs;
         inputs_arr.getMatVector(inputs);
+
+        // CV_64F skips the float-only packed-B/MLAS caching below; see forwardDouble().
+        if (inputs[0].depth() == CV_64F)
+            return;
+
         LayerGemmOpMode mode = getOpMode(inputs.size(), blobs.size());
 
         // pack B if it is const
@@ -351,6 +381,11 @@ public:
         outputs_arr.getMatVector(outputs);
 
         LayerGemmOpMode mode = getOpMode(inputs.size(), blobs.size());
+
+        if (inputs[0].depth() == CV_64F) {
+            forwardDouble(inputs, outputs, mode);
+            return;
+        }
 
         const auto &A = inputs[0];
         auto &Y = outputs[0];
@@ -473,21 +508,94 @@ public:
         }
     }
 
+    // Double-precision analogue of broadcastCWtihBeta() above; not cached (see finalize()).
+    static void fillBroadcastCDouble(int M, int N, const Mat& C, double beta, Mat& dst)
+    {
+        CV_Assert(dst.rows == M && dst.cols == N);
+        double* out = dst.ptr<double>();
+        size_t total = (size_t)M * (size_t)N;
+
+        if (beta == 0 || C.empty()) {
+            std::fill_n(out, total, 0.0);
+            return;
+        }
+
+        const double* c = C.ptr<const double>();
+        const auto shape_C = shape(C);
+        int ndims_C = (int)shape_C.size();
+
+        if (ndims_C == 0 || (ndims_C == 1 && shape_C[0] == 1) ||
+            (ndims_C == 2 && shape_C[0] == 1 && shape_C[1] == 1)) {
+            // (), (1,), (1, 1): single scalar broadcast to every element.
+            std::fill_n(out, total, beta * c[0]);
+        } else if ((ndims_C == 1 && shape_C[0] == N) ||
+                   (ndims_C == 2 && shape_C[0] == 1 && shape_C[1] == N)) {
+            // (N,), (1, N): one row broadcast down every row.
+            for (int i = 0; i < M; i++)
+                for (int j = 0; j < N; j++)
+                    out[(size_t)i * N + j] = beta * c[j];
+        } else if (ndims_C == 2 && shape_C[0] == M && shape_C[1] == 1) {
+            // (M, 1): one value per row broadcast across every column.
+            for (int i = 0; i < M; i++)
+                std::fill_n(out + (size_t)i * N, N, beta * c[i]);
+        } else {
+            // (M, N): no broadcast, just scale.
+            CV_CheckEQ(shape_C[0], M, "DNN/Gemm: C is not broadcast properly");
+            CV_CheckEQ(shape_C[1], N, "DNN/Gemm: C is not broadcast properly");
+            for (size_t i = 0; i < total; i++)
+                out[i] = beta * c[i];
+        }
+    }
+
+    // CV_64F via cv::gemm, not the float-only fastGemm/MLAS kernels above.
+    void forwardDouble(const std::vector<Mat>& inputs, std::vector<Mat>& outputs, LayerGemmOpMode mode)
+    {
+        const Mat &A = inputs[0];
+        Mat &Y = outputs[0];
+        const Mat &B = constB(mode) ? blobs[0] : inputs[1];
+
+        CV_CheckTypeEQ(B.depth(), CV_64F, "DNN/Gemm: B must be CV_64F to match A");
+        CV_Assert(A.isContinuous() && Y.isContinuous());
+
+        const auto shape_A = shape(A), shape_Y = shape(Y);
+        size_t dims_A = shape_A.size();
+        int na = shape_A[dims_A - 1];
+        size_t dims_Y = shape_Y.size();
+        int N = shape_Y[dims_Y - 1];
+        const int rows = (int)(Y.total() / (size_t)N);
+
+        // 2D views onto existing data, no copy; trans_a/trans_b via cv::gemm's own flags.
+        Mat Aview = A.reshape(1, (int)(A.total() / (size_t)na));
+        Mat Yview = Y.reshape(1, rows);
+        const int flags = (trans_a ? GEMM_1_T : 0) | (trans_b ? GEMM_2_T : 0);
+
+        const bool haveC = constC(mode) || inputs.size() >= 3;
+        if (haveC) {
+            const Mat& C = (inputs.size() >= 3) ? inputs.back() : blobs.back();
+            CV_CheckTypeEQ(C.depth(), CV_64F, "DNN/Gemm: C must be CV_64F to match A");
+            fillBroadcastCDouble(rows, N, C, (double)beta, Yview);
+            cv::gemm(Aview, B, (double)alpha, Yview, 1.0, Yview, flags);
+        } else {
+            cv::gemm(Aview, B, (double)alpha, Mat(), 0.0, Yview, flags);
+        }
+    }
+
 #ifdef HAVE_CUDA
     // Y = A * B + C. B should be guaranteed as two dimensional.
     Ptr<BackendNode> initCUDA(void *context_,
-                              const std::vector<Ptr<BackendWrapper>>& inputs,
-                              const std::vector<Ptr<BackendWrapper>>& outputs) CV_OVERRIDE {
+                              InputArrayOfArrays inputs_,
+                              InputArrayOfArrays outputs) CV_OVERRIDE {
         CV_CheckFalse(trans_a, "DNN/Gemm/Cuda: does not support transA");
         CV_CheckTrue(const_B, "DNN/Gemm/Cuda: input B (weight) is required to be constant");
         auto context = reinterpret_cast<csl::CSLContext*>(context_);
-        auto wrapper_A = inputs[0].dynamicCast<CUDABackendWrapper>();
+        std::vector<cuda::GpuMatND> inputs;
+        inputs_.getGpuMatNDVector(inputs);
         auto B = blobs[0];
         auto C = have_bias && const_C ? blobs[1] : Mat(); // in most cases C is constant
 
         if (!trans_b)
             cv::transpose(B, B);
-        auto flatten_start_axis = normalize_axis(1, wrapper_A->getRank());
+        auto flatten_start_axis = normalize_axis(1, (int)inputs[0].size.size());
         return make_cuda_node<cuda4dnn::InnerProductOp>(preferableTarget, std::move(context->stream), std::move(context->cublas_handle), flatten_start_axis, B, C);
     }
 #endif // HAVE_CUDA

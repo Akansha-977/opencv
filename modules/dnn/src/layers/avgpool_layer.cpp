@@ -7,6 +7,7 @@
 #include "../net_impl.hpp"
 #include "conv2_common.hpp"
 #include "opencv2/core/hal/intrin.hpp"
+#include "../hal_replacement.hpp"
 
 namespace cv
 {
@@ -23,6 +24,20 @@ static void avgPool32f(const void* inp_, void* out_,
     CV_Assert(cs.inpshape.dims == cs.outshape.dims);
 
     parallel_for_(Range(0, NC1), [&](const Range& r) {
+        // Offer this task range to an accelerated HAL first, flattening the descriptor into
+        // a stable C argument list (no dnn types cross the boundary). On NOT_IMPLEMENTED
+        // (the default) fall through to the built-in kernel for [r.start, r.end).
+        {
+            int sd = cs.nspatialdims;
+            int insize[3]  = { sd > 2 ? cs.inpshape[sd-1] : 1, sd > 1 ? cs.inpshape[sd] : 1, cs.inpshape[sd+1] };
+            int outsize[3] = { sd > 2 ? cs.outshape[sd-1] : 1, sd > 1 ? cs.outshape[sd] : 1, cs.outshape[sd+1] };
+            CALL_HAL(dnn_avgpool3d32f, cv_hal_dnn_avgpool3d32f,
+                     (const float*)inp_, (float*)out_, cs.inpshape.back(),
+                     insize, outsize, cs.strides, cs.pads, cs.inner,
+                     cs.coordtab.data(), cs.ofstab.data(), (int)cs.ofstab.size(),
+                     count_include_pad_ ? 1 : 0, r.start, r.end);
+        }
+
         constexpr int MAX_POOL_DIMS = ConvState::MAX_CONV_DIMS;
 
         CV_Assert(cs.nspatialdims <= MAX_POOL_DIMS && MAX_POOL_DIMS == 3);
@@ -53,8 +68,11 @@ static void avgPool32f(const void* inp_, void* out_,
         float* out = (float*)out_ + nc0*planesize;
         float iksize = 1.f/ksize;
 
-#if CV_SIMD || CV_SIMD_SCALABLE
+#if CV_SIMD
         int nlanes = VTraits<v_float32>::vlanes();
+        // RVV (CV_SIMD_SCALABLE) disabled for the m1 switch: with the fixed C0=8 the
+        // block is narrower than the register at VLEN>=512, tripping this assert. Runs
+        // scalar on RVV; re-enable via v_setvlmax<v_float32>(C0) (#29493, cf #29180).
         CV_Assert(C0 == nlanes || C0 == nlanes*2 || C0 % (nlanes*4) == 0);
         v_float32 z = vx_setzero_f32();
         v_float32 vscale0 = vx_setall_f32(iksize);
@@ -69,12 +87,12 @@ static void avgPool32f(const void* inp_, void* out_,
                         y0 >= inner_y0 && y0 < inner_y1 ? inner_x0 : W;
                     int yi_ = y0*SY - padY0;
 
-                #if !(CV_SIMD || CV_SIMD_SCALABLE)
+                #if !(CV_SIMD)
                     memset(out, 0, W*C0*sizeof(out[0]));
                 #endif
 
                     for(;;) {
-                    #if CV_SIMD || CV_SIMD_SCALABLE
+                    #if CV_SIMD
                         if (nlanes == C0) {
                             for (; x0 < x1; x0++) {
                                 int xi_ = x0*SX - padX0;
@@ -162,7 +180,7 @@ static void avgPool32f(const void* inp_, void* out_,
                             break;
                         x1 = inner_x1;
 
-                    #if CV_SIMD || CV_SIMD_SCALABLE
+                    #if CV_SIMD
                         if (nlanes == C0) {
                             for (; x0 < x1; x0++) {
                                 int xi_ = x0*SX - padX0;

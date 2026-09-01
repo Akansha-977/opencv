@@ -10,6 +10,7 @@
 #ifdef HAVE_PROTOBUF
 #include "../graph_simplifier.hpp"
 #include "onnx_graph_simplifier.hpp"
+#include "onnx_dtype_convert.hpp"
 #include <opencv2/core/utils/filesystem.hpp>
 #include "opencv2/core/utils/filesystem.private.hpp"
 
@@ -1402,74 +1403,6 @@ public:
     }
 };
 
-class GatherCastSubgraph : public Subgraph
-{
-public:
-    GatherCastSubgraph()
-    {
-        int input = addNodeToMatch("");
-        int index = addNodeToMatch("Constant");
-        gather = addNodeToMatch("Gather", input, index);
-        cast = addNodeToMatch("Cast", gather);
-        setFusedNode("Gather", input, index);
-    }
-
-    virtual bool match(const Ptr<ImportGraphWrapper>& net, int nodeId,
-                       std::vector<int>& matchedNodesIds) CV_OVERRIDE
-    {
-        bool retVal = Subgraph::match(net, nodeId, matchedNodesIds);
-        size_t matchedNodesNum = matchedNodesIds.size();
-        // Now we check if merging can be made for these Gather and Cast nodes
-        if (!retVal || matchedNodesNum < 2)
-            return retVal;
-        else {
-            int nodeToMatch = matchedNodesIds[cast];
-            const Ptr<ImportNodeWrapper> node = net->getNode(nodeToMatch);
-            if (node->getType() == "Cast") {
-                int inpNodeId = matchedNodesIds[gather];
-                const Ptr<ImportNodeWrapper> inpNode = net->getNode(inpNodeId);
-                if (inpNode->getType() == "Gather") {
-                    int numNodes = net->getNumNodes();
-                    std::string inpNodeName = node->getInputName(0);
-                    for (int i = 0; i < numNodes; ++i) {
-                        const Ptr<ImportNodeWrapper> node_to_check = net->getNode(i);
-                        int numInp = node_to_check->getNumInputs();
-                        for (int inp = 0; inp < numInp; ++inp) {
-                            if (i != nodeToMatch && inpNodeName == node_to_check->getInputName(inp)) {
-                                // Another node has the same input node, so it cannot be merged.
-                                return false;
-                            }
-                        }
-                    }
-                    // extract axis from original Gather node
-                    axis = 0;
-                    opencv_onnx::NodeProto* origGatherNode =
-                        inpNode.dynamicCast<ONNXNodeWrapper>()->node;
-                    for (int i = 0; i < origGatherNode->attribute_size(); i++) {
-                        opencv_onnx::AttributeProto attr = origGatherNode->attribute(i);
-                        if (attr.name() == "axis")
-                            axis = attr.i();
-                    }
-                }
-            }
-        }
-        return retVal;
-    }
-
-    virtual void finalize(const Ptr<ImportGraphWrapper>& net,
-                          const Ptr<ImportNodeWrapper>& fusedNode,
-                          std::vector<Ptr<ImportNodeWrapper> >& /*inputs*/) CV_OVERRIDE
-    {
-        opencv_onnx::NodeProto* node = fusedNode.dynamicCast<ONNXNodeWrapper>()->node;
-        opencv_onnx::AttributeProto* new_attr = node->add_attribute();
-        new_attr->set_name("axis");
-        new_attr->set_i(axis);
-    }
-
-private:
-    int cast, gather, axis;
-};
-
 /*  Constant folding shape for Expand.
 
     Before fusion:
@@ -1626,19 +1559,6 @@ public:
         int add = addNodeToMatch("Add", addVal, exp);
         addNodeToMatch("Log", add);
         setFusedNode("Softplus", input);
-    }
-};
-
-class MulCastSubgraph : public Subgraph
-{
-public:
-    MulCastSubgraph()
-    {
-        int input = addNodeToMatch("");
-        int scaleNode = addNodeToMatch("Constant");
-        int mul = addNodeToMatch("Mul", input, scaleNode);
-        addNodeToMatch("Cast", mul);
-        setFusedNode("Mul", input, scaleNode);
     }
 };
 
@@ -1922,8 +1842,6 @@ void simplifySubgraphs(opencv_onnx::GraphProto& net, const std::string& basePath
     subgraphs.push_back(makePtr<GeluSubGraph>());
     subgraphs.push_back(makePtr<GeluApproximationSubGraph>());
     subgraphs.push_back(makePtr<LayerNormSubGraph>());
-    subgraphs.push_back(makePtr<GatherCastSubgraph>());
-    subgraphs.push_back(makePtr<MulCastSubgraph>());
     subgraphs.push_back(makePtr<UpsampleSubgraph>());
     subgraphs.push_back(makePtr<ResizeSubgraph1>());
     subgraphs.push_back(makePtr<ResizeSubgraph2>());
@@ -2023,14 +1941,55 @@ static char* getTensorRAWData(const opencv_onnx::TensorProto& tensor_proto,
     }
 }
 
+// ONNX dtype -> OpenCV type. Shared with the ONNX importer (declared in the header).
+int dataType2cv(int dt)
+{
+    return
+        dt == opencv_onnx::TensorProto_DataType_UINT8 ? CV_8U :
+        dt == opencv_onnx::TensorProto_DataType_INT8 ? CV_8S :
+        dt == opencv_onnx::TensorProto_DataType_UINT16 ? CV_16U :
+        dt == opencv_onnx::TensorProto_DataType_INT16 ? CV_16S :
+        dt == opencv_onnx::TensorProto_DataType_UINT32 ? CV_32U :
+        dt == opencv_onnx::TensorProto_DataType_INT32 ? CV_32S :
+        dt == opencv_onnx::TensorProto_DataType_UINT64 ? CV_64U :
+        dt == opencv_onnx::TensorProto_DataType_INT64 ? CV_64S :
+        dt == opencv_onnx::TensorProto_DataType_FLOAT ? CV_32F :
+        dt == opencv_onnx::TensorProto_DataType_DOUBLE ? CV_64F :
+        dt == opencv_onnx::TensorProto_DataType_FLOAT16 ? CV_16F :
+        dt == opencv_onnx::TensorProto_DataType_BFLOAT16 ? CV_16BF :
+        dt == opencv_onnx::TensorProto_DataType_COMPLEX64 ? CV_32FC2 :
+        dt == opencv_onnx::TensorProto_DataType_COMPLEX128 ? CV_64FC2 :
+        dt == opencv_onnx::TensorProto_DataType_BOOL ? CV_Bool :
+        dt == opencv_onnx::TensorProto_DataType_UINT4 ? CV_8U :
+        dt == opencv_onnx::TensorProto_DataType_INT4 ? CV_8S :
+        dt == onnx_dtype::ONNX_FLOAT8E8M0 ? CV_32F :
+        onnx_dtype::isFp8Native(dt) ? onnx_dtype::fp8NativeDepth(dt) :
+        onnx_dtype::isExoticFloat(dt) ? CV_16F : -1;
+}
+
 Mat getMatFromTensor(const opencv_onnx::TensorProto& tensor_proto, bool uint8ToInt8, const std::string base_path)
 {
     if (tensor_proto.raw_data().empty() && tensor_proto.float_data().empty() &&
         tensor_proto.double_data().empty() && tensor_proto.int64_data().empty() &&
-        tensor_proto.int32_data().empty() &&
+        tensor_proto.int32_data().empty() && tensor_proto.uint64_data().empty() &&
         (!tensor_proto.has_data_location() || tensor_proto.data_location() != opencv_onnx::TensorProto::EXTERNAL)
     )
+    {
+        // Preserve dtype for an empty tensor (0-sized dim); untyped Mat() defaults to CV_8U.
+        // fp16 -> CV_32F to match the payload widening below.
+        int type = dataType2cv(tensor_proto.data_type());
+        if (type == CV_16F)
+            type = CV_32F;
+        bool genuinely_empty = false;
+        for (int d = 0; d < tensor_proto.dims_size(); d++)
+            if (tensor_proto.dims(d) == 0) { genuinely_empty = true; break; }
+        if (type >= 0 && genuinely_empty)
+        {
+            std::vector<int> shape(tensor_proto.dims().begin(), tensor_proto.dims().end());
+            return Mat(shape, type);
+        }
         return Mat();
+    }
 
     // read binary data, should be just empty in case it is set in <DTYPE>_data field
     std::vector<int64_t> external_tensor_data;
@@ -2076,33 +2035,23 @@ Mat getMatFromTensor(const opencv_onnx::TensorProto& tensor_proto, bool uint8ToI
     }
     else if (datatype == opencv_onnx::TensorProto_DataType_FLOAT16)
     {
-        // FIXME, for now, we only load FP16 Tensor as FP32 Mat, full support for FP16 is required in the future.
-        CV_LOG_ONCE_INFO(NULL, "DNN: load FP16 model as FP32 model, and it takes twice the FP16 RAM requirement.");
-
-        // ONNX saves float 16 data in two format: int32 and raw_data.
+        // Load FP16 natively as CV_16F; ONNX stores it in int32_data or raw_data.
         // Link: https://github.com/onnx/onnx/issues/4460#issuecomment-1224373746
         if (!tensor_proto.int32_data().empty())
         {
             size_t sz = tensor_proto.int32_data().size();
             checkPayloadSize(sz);
             std::vector<int16_t> halfvec(sz);
+            blob.create((int)sizes.size(), sizes.data(), CV_16FC1);
             const int32_t* intdata = (const int32_t*)tensor_proto.int32_data().data();
+            uint16_t* dst = (uint16_t*)blob.data;
             for (size_t i = 0; i < sz; i++)
-            {
-                union
-                {
-                    int16_t h;
-                    int32_t i;
-                } u;
-                u.i = intdata[i];
-                halfvec[i] = u.h;
-            }
-            Mat(sizes, CV_16FC1, halfvec.data()).convertTo(blob, CV_32FC1);
+                dst[i] = (uint16_t)(intdata[i] & 0xFFFF);
         }
         else
         {
             checkPayloadSize(raw_data_size / sizeof(int16_t));
-            Mat(sizes, CV_16FC1, rawdata).convertTo(blob, CV_32FC1);
+            Mat(sizes, CV_16FC1, rawdata).copyTo(blob);
         }
     }
     else if (datatype == opencv_onnx::TensorProto_DataType_BFLOAT16)
@@ -2135,7 +2084,7 @@ Mat getMatFromTensor(const opencv_onnx::TensorProto& tensor_proto, bool uint8ToI
         if (!tensor_proto.double_data().empty())
         {
             checkPayloadSize(tensor_proto.double_data().size());
-            Mat(sizes, CV_64FC1, (void*)tensor_proto.double_data().data()).convertTo(blob, CV_32FC1);
+            Mat(sizes, CV_64FC1, (void*)tensor_proto.double_data().data()).copyTo(blob);
         }
         else
         {
@@ -2219,10 +2168,11 @@ Mat getMatFromTensor(const opencv_onnx::TensorProto& tensor_proto, bool uint8ToI
     }
     else if (datatype == opencv_onnx::TensorProto_DataType_UINT32)
     {
-        if (!tensor_proto.int32_data().empty())
+        // ONNX packs both UINT32 and UINT64 values into uint64_data, per spec.
+        if (!tensor_proto.uint64_data().empty())
         {
-            checkPayloadSize(tensor_proto.int32_data().size());
-            Mat(sizes, CV_32SC1, (void*)tensor_proto.int32_data().data()).convertTo(blob, CV_32UC1);
+            checkPayloadSize(tensor_proto.uint64_data().size());
+            Mat(sizes, CV_64UC1, (void*)tensor_proto.uint64_data().data()).convertTo(blob, CV_32UC1);
         }
         else
         {
@@ -2232,10 +2182,10 @@ Mat getMatFromTensor(const opencv_onnx::TensorProto& tensor_proto, bool uint8ToI
     }
     else if (datatype == opencv_onnx::TensorProto_DataType_UINT64)
     {
-        if (!tensor_proto.int64_data().empty())
+        if (!tensor_proto.uint64_data().empty())
         {
-            checkPayloadSize(tensor_proto.int64_data().size());
-            Mat(sizes, CV_64SC1, (void*)tensor_proto.int64_data().data()).convertTo(blob, CV_64UC1);
+            checkPayloadSize(tensor_proto.uint64_data().size());
+            Mat(sizes, CV_64UC1, (void*)tensor_proto.uint64_data().data()).copyTo(blob);
         }
         else
         {
@@ -2281,6 +2231,58 @@ Mat getMatFromTensor(const opencv_onnx::TensorProto& tensor_proto, bool uint8ToI
             Mat(sizes, CV_64SC1, (void*)tensor_proto.int64_data().data()).convertTo(blob, CV_64UC1);
         else
             Mat(sizes, CV_64UC1, rawdata).copyTo(blob);
+    }
+    else if (datatype == opencv_onnx::TensorProto_DataType_FLOAT8E4M3FN ||
+             datatype == opencv_onnx::TensorProto_DataType_FLOAT8E4M3FNUZ)
+    {
+        // E4M3FN/E4M3FNUZ have a native depth: keep the raw FP8 bytes.
+        checkPayloadSize(raw_data_size);
+        blob.create((int)sizes.size(), sizes.data(),
+                    CV_MAKETYPE(onnx_dtype::fp8NativeDepth(datatype), 1));
+        memcpy(blob.data, rawdata, (size_t)blob.total() * blob.elemSize());
+    }
+    else if (datatype == opencv_onnx::TensorProto_DataType_FLOAT8E5M2 ||
+             datatype == opencv_onnx::TensorProto_DataType_FLOAT8E5M2FNUZ)
+    {
+        // E5M2/E5M2FNUZ have no native depth: decode losslessly into CV_16F.
+        const onnx_dtype::Fp8Fmt fmt = onnx_dtype::fp8FmtFor(datatype);
+        blob.create((int)sizes.size(), sizes.data(), CV_16FC1);
+        const uchar* src = (const uchar*)rawdata;
+        hfloat* dst = blob.ptr<hfloat>();
+        for (size_t i = 0, total = blob.total(); i < total; i++)
+            dst[i] = hfloat(onnx_dtype::fp8ToF32(src[i], fmt));
+    }
+    else if (datatype == onnx_dtype::ONNX_FLOAT8E8M0)
+    {
+        blob.create((int)sizes.size(), sizes.data(), CV_32FC1);
+        const uchar* src = (const uchar*)rawdata;
+        float* dst = blob.ptr<float>();
+        for (size_t i = 0, total = blob.total(); i < total; i++)
+            dst[i] = onnx_dtype::e8m0ToF32(src[i]);
+    }
+    else if (datatype == opencv_onnx::TensorProto_DataType_FLOAT4E2M1)
+    {
+        blob.create((int)sizes.size(), sizes.data(), CV_16FC1);
+        const uchar* src = (const uchar*)rawdata;
+        hfloat* dst = blob.ptr<hfloat>();
+        for (size_t i = 0, total = blob.total(); i < total; i++)
+            dst[i] = hfloat(onnx_dtype::fp4ToF32(onnx_dtype::unpackNibble(src, i)));
+    }
+    else if (datatype == opencv_onnx::TensorProto_DataType_INT4)
+    {
+        blob.create((int)sizes.size(), sizes.data(), CV_8SC1);
+        const uchar* src = (const uchar*)rawdata;
+        schar* dst = blob.ptr<schar>();
+        for (size_t i = 0, total = blob.total(); i < total; i++)
+            dst[i] = onnx_dtype::int4SignExtend(onnx_dtype::unpackNibble(src, i));
+    }
+    else if (datatype == opencv_onnx::TensorProto_DataType_UINT4)
+    {
+        blob.create((int)sizes.size(), sizes.data(), CV_8UC1);
+        const uchar* src = (const uchar*)rawdata;
+        uchar* dst = blob.ptr<uchar>();
+        for (size_t i = 0, total = blob.total(); i < total; i++)
+            dst[i] = onnx_dtype::unpackNibble(src, i);
     }
     else
     {

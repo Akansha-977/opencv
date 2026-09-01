@@ -2249,21 +2249,10 @@ TEST(Layer_LSTM, repeatedInference)
 
 TEST(Layer_If, resize)
 {
-    // Skip this test when the classic DNN engine is explicitly requested. The
-    // "if" layer is supported only by the new engine.
-    auto engine_forced = static_cast<cv::dnn::EngineType>(
-            cv::utils::getConfigurationParameterSizeT("OPENCV_FORCE_DNN_ENGINE", cv::dnn::ENGINE_AUTO));
-    if (engine_forced == cv::dnn::ENGINE_CLASSIC)
-    {
-        // Mark the test as skipped and exit early.
-        applyTestTag(CV_TEST_TAG_DNN_SKIP_PARSER);
-        return;
-    }
-
     const std::string imgname   = findDataFile("cv/shared/lena.png", true);
     const std::string modelname = findDataFile("dnn/onnx/models/if_layer.onnx", true);
 
-    dnn::Net net = dnn::readNetFromONNX(modelname, ENGINE_NEW);
+    dnn::Net net = dnn::readNetFromONNX(modelname, ENGINE_OPENCV);
     Mat src = imread(imgname), blob;
     dnn::blobFromImage(src, blob, 1.0, cv::Size(), cv::Scalar(), false, false);
 
@@ -2286,16 +2275,8 @@ TEST(Layer_If, resize)
 
 TEST(Layer_If, subgraph_name_scoping)
 {
-    auto engine_forced = static_cast<cv::dnn::EngineType>(
-            cv::utils::getConfigurationParameterSizeT("OPENCV_FORCE_DNN_ENGINE", cv::dnn::ENGINE_AUTO));
-    if (engine_forced == cv::dnn::ENGINE_CLASSIC)
-    {
-        applyTestTag(CV_TEST_TAG_DNN_SKIP_PARSER);
-        return;
-    }
-
     const std::string modelname = findDataFile("dnn/onnx/models/subgraph_name_scoping.onnx", true);
-    dnn::Net net = dnn::readNetFromONNX(modelname, ENGINE_NEW);
+    dnn::Net net = dnn::readNetFromONNX(modelname, ENGINE_OPENCV);
 
     int xshape[1] = {2};
     Mat x(1, xshape, CV_32F);
@@ -2331,16 +2312,8 @@ TEST(Layer_If, subgraph_name_scoping)
 
 TEST(Layer_Size, onnx_1d)
 {
-    auto engine_forced = static_cast<cv::dnn::EngineType>(
-        cv::utils::getConfigurationParameterSizeT("OPENCV_FORCE_DNN_ENGINE", cv::dnn::ENGINE_AUTO));
-    if (engine_forced == cv::dnn::ENGINE_CLASSIC)
-    {
-        applyTestTag(CV_TEST_TAG_DNN_SKIP_PARSER);
-        return;
-    }
-
     const std::string modelname = findDataFile("dnn/onnx/models/test_size_1d_model.onnx", true);
-    cv::dnn::Net net = cv::dnn::readNetFromONNX(modelname, ENGINE_NEW);
+    cv::dnn::Net net = cv::dnn::readNetFromONNX(modelname, ENGINE_OPENCV);
 
     int sz1d[1] = {7};
     cv::Mat x(1, sz1d, CV_32F);
@@ -2358,16 +2331,8 @@ TEST(Layer_Size, onnx_1d)
 
 TEST(Layer_Size, onnx_0d_scalar)
 {
-    auto engine_forced = static_cast<cv::dnn::EngineType>(
-        cv::utils::getConfigurationParameterSizeT("OPENCV_FORCE_DNN_ENGINE", cv::dnn::ENGINE_AUTO));
-    if (engine_forced == cv::dnn::ENGINE_CLASSIC)
-    {
-        applyTestTag(CV_TEST_TAG_DNN_SKIP_PARSER);
-        return;
-    }
-
     const std::string modelname = findDataFile("dnn/onnx/models/test_size_0d_model.onnx", true);
-    cv::dnn::Net net = cv::dnn::readNetFromONNX(modelname, ENGINE_NEW);
+    cv::dnn::Net net = cv::dnn::readNetFromONNX(modelname, ENGINE_OPENCV);
 
     cv::Mat x(1, 1, CV_32F);
     x.at<float>(0, 0) = 3.14f;
@@ -2380,6 +2345,47 @@ TEST(Layer_Size, onnx_0d_scalar)
     EXPECT_EQ(outs[0].total(), (size_t)1);
     EXPECT_EQ(outs[0].type(), CV_64S);
     EXPECT_EQ(outs[0].at<int64_t>(0), 1);
+}
+
+TEST(Layer_GatherCast, preserves_float_cast)
+{
+    const std::string modelname = findDataFile("dnn/onnx/models/gather_cast_float.onnx", true);
+    Net net = readNetFromONNX(modelname, ENGINE_OPENCV);
+    ASSERT_FALSE(net.empty());
+    ASSERT_TRUE(net.getMainGraph());
+
+    int inputShape[] = {2, 3};
+    Mat input(2, inputShape, CV_32F, Scalar(0));
+    net.setInput(input, "input");
+
+    std::vector<Mat> outputs;
+    net.forward(outputs, std::vector<String>{"output"});
+
+    ASSERT_EQ(outputs.size(), 1u);
+    EXPECT_EQ(outputs[0].total(), (size_t)1);
+    EXPECT_EQ(outputs[0].type(), CV_32F);
+    EXPECT_FLOAT_EQ(outputs[0].ptr<float>()[0], 2.f);
+}
+
+TEST(Layer_MulCast, preserves_float_cast)
+{
+    const std::string modelname = findDataFile("dnn/onnx/models/mul_cast_float.onnx", true);
+    Net net = readNetFromONNX(modelname, ENGINE_OPENCV);
+    ASSERT_FALSE(net.empty());
+    ASSERT_TRUE(net.getMainGraph());
+
+    int inputShape[] = {2, 3};
+    Mat input(2, inputShape, CV_32F, Scalar(0));
+    net.setInput(input, "input");
+
+    std::vector<Mat> outputs;
+    net.forward(outputs, std::vector<String>{"output"});
+
+    ASSERT_EQ(outputs.size(), 1u);
+    EXPECT_EQ(outputs[0].total(), (size_t)2);
+    EXPECT_EQ(outputs[0].type(), CV_32F);
+    EXPECT_FLOAT_EQ(outputs[0].ptr<float>()[0], 2.f);
+    EXPECT_FLOAT_EQ(outputs[0].ptr<float>()[1], 2.f);
 }
 
 TEST(ConvolutionWinograd, Accuracy)
@@ -2430,20 +2436,11 @@ class TESTKVCache : public testing::TestWithParam<std::string>
 public:
     void testKVCache(const std::string& layout)
     {
-        auto engine_forced = static_cast<cv::dnn::EngineType>(
-                cv::utils::getConfigurationParameterSizeT("OPENCV_FORCE_DNN_ENGINE", cv::dnn::ENGINE_AUTO));
-        if (engine_forced == cv::dnn::ENGINE_CLASSIC)
-        {
-            // Mark the test as skipped and exit early.
-            applyTestTag(CV_TEST_TAG_DNN_SKIP_PARSER);
-            return;
-        }
-
         std::string model_path = "dnn/onnx/models/test_attention_kv_cache_" + layout + ".onnx";
 
-        Net netWithKVCache = readNetFromONNX(findDataFile(model_path, true), cv::dnn::ENGINE_NEW);
+        Net netWithKVCache = readNetFromONNX(findDataFile(model_path, true), cv::dnn::ENGINE_OPENCV);
         netWithKVCache.enableKVCache();
-        Net netWithoutKVCache = readNetFromONNX(findDataFile(model_path, true), cv::dnn::ENGINE_NEW);
+        Net netWithoutKVCache = readNetFromONNX(findDataFile(model_path, true), cv::dnn::ENGINE_OPENCV);
 
         int T = 523, Nq = 8, Nkv = 4, D = 256;
         // Keep the prefill larger than one cache page, then exercise generation
@@ -2544,11 +2541,100 @@ public:
         std::string msg = "Attention generate " + layout + ": KV vs standard";
         normAssert(Y, Yref, msg.c_str(), 1e-3, 1e-3);
     }
+
+    // Generate in multi-token chunks (chunked prefill / speculative decode) with the page pool
+    // pre-reserved. Must match the non-cached full run; reserveTokens below the full length
+    // exercises reservation as a hint rather than a limit.
+    void testKVCacheChunkedReserve(const std::string& layout, int reserveTokens)
+    {
+        std::string model_path = "dnn/onnx/models/test_attention_kv_cache_" + layout + ".onnx";
+
+        Net netWithKVCache = readNetFromONNX(findDataFile(model_path, true), cv::dnn::ENGINE_OPENCV);
+        netWithKVCache.enableKVCache();
+        Net netWithoutKVCache = readNetFromONNX(findDataFile(model_path, true), cv::dnn::ENGINE_OPENCV);
+
+        int T = 523, Nq = 8, Nkv = 4, D = 256;
+        int T_pref = T - 37;    // generate the tail in chunks, incl. a partial last chunk
+        int chunk = 5;
+
+        netWithKVCache.reserveKVCache(reserveTokens);   // static pre-allocation
+
+        std::vector<int> q_sz, k_sz, v_sz;
+        if (layout == "3d") { q_sz = {1, T, Nq * D}; k_sz = {1, T, Nkv * D}; v_sz = {1, T, Nkv * D}; }
+        else                { q_sz = {1, Nq, T, D}; k_sz = {1, Nkv, T, D}; v_sz = {1, Nkv, T, D}; }
+
+        Mat Q_all(q_sz, CV_32F), K_all(k_sz, CV_32F), V_all(v_sz, CV_32F);
+        cv::randn(Q_all, 0.0, 1.0); cv::randn(K_all, 0.0, 1.0); cv::randn(V_all, 0.0, 1.0);
+
+        std::vector<int> mask_sz = {1, Nq, T, T};
+        Mat mask(mask_sz, CV_32S, cv::Scalar(0));
+        int* mask_ptr = (int*)mask.data;
+        for (int n = 0; n < Nq; n++)
+            for (int i = 0; i < T; i++)
+                for (int j = 0; j < T; j++) {
+                    int idx = n * T * T + i * T + j;
+                    if (i < T_pref) { if (j < T_pref) mask_ptr[idx] = 1; }
+                    else            { if (j <= i)      mask_ptr[idx] = 1; }
+                }
+
+        Mat Y(q_sz, CV_32F); Y.setTo(0);
+
+        // Prefill (lo=0) then generate in multi-token chunks. A chunk needs within-chunk
+        // causality supplied explicitly (this model is not is_causal), so feed the reference
+        // mask restricted to queries [lo,hi) against the cache [0,hi).
+        for (int lo = 0; lo < T; )
+        {
+            int hi = (lo == 0) ? T_pref : std::min(lo + chunk, T);
+            std::vector<Range> qr;
+            if (layout == "3d") qr = { Range::all(), Range(lo, hi), Range::all() };
+            else                qr = { Range::all(), Range::all(), Range(lo, hi), Range::all() };
+            std::vector<Range> mr = { Range::all(), Range::all(), Range(lo, hi), Range(0, hi) };
+
+            netWithKVCache.setInput(Q_all(qr), "Q");
+            netWithKVCache.setInput(K_all(qr), "K");
+            netWithKVCache.setInput(V_all(qr), "V");
+            netWithKVCache.setInput(mask(mr).clone(), "Mask");
+            netWithKVCache.forward().copyTo(Y(qr));
+            lo = hi;
+        }
+
+        // 3. Reference: full sequence, no cache
+        netWithoutKVCache.setInput(Q_all, "Q");
+        netWithoutKVCache.setInput(K_all, "K");
+        netWithoutKVCache.setInput(V_all, "V");
+        netWithoutKVCache.setInput(mask, "Mask");
+        Mat Yref = netWithoutKVCache.forward();
+
+        std::string msg = "Attention chunked+reserve " + layout + ": KV vs standard";
+        normAssert(Y, Yref, msg.c_str(), 1e-3, 1e-3);
+    }
 };
 
 TEST_P(TESTKVCache, layouts)
 {
     testKVCache(GetParam());
+}
+
+TEST_P(TESTKVCache, chunked_reserve)
+{
+    testKVCacheChunkedReserve(GetParam(), 523);
+}
+
+// Reservation is a hint, not a cap: the pool still grows past it.
+TEST_P(TESTKVCache, reserve_underrun)
+{
+    testKVCacheChunkedReserve(GetParam(), 100);
+}
+
+TEST_P(TESTKVCache, reserve_requires_enable)
+{
+    std::string model_path = "dnn/onnx/models/test_attention_kv_cache_" + GetParam() + ".onnx";
+    Net net = readNetFromONNX(findDataFile(model_path, true), cv::dnn::ENGINE_OPENCV);
+    EXPECT_THROW(net.reserveKVCache(128), cv::Exception);
+
+    net.enableKVCache();
+    EXPECT_NO_THROW(net.reserveKVCache(128));
+    EXPECT_THROW(net.reserveKVCache(-1), cv::Exception);
 }
 
 INSTANTIATE_TEST_CASE_P(KV_Cache, TESTKVCache, testing::Values("3d", "4d"));
@@ -2744,6 +2830,35 @@ TEST(Test_MatMul, FastGemmBatchDynamicAndPackedBroadcast)
     ASSERT_EQ(packedOutputs.size(), (size_t)1);
     Mat packedExpected = reference(packedB, false, true);
     normAssert(packedOutputs[0], packedExpected, "fastGemm packed broadcast batch mismatch", 1e-4, 1e-4);
+}
+
+TEST(Test_MatMul, ConstantRank1WeightPacking)
+{
+    // [M, K] @ [K] -> [M] with a constant rank-1 weight, as seen in DEIMv2-style graphs.
+    const int M = 4960, K = 33;
+    Mat A(M, K, CV_32F);
+    Mat B(std::vector<int>{K}, CV_32F);  // genuinely rank-1, not [K, 1]
+    randu(A, -1.f, 1.f);
+    randu(B, -1.f, 1.f);
+
+    LayerParams lp;
+    lp.type = "MatMul";
+    lp.name = "matmul_constant_rank1_B";
+    lp.set("transA", false);
+    lp.set("transB", false);
+    lp.blobs.push_back(B);
+
+    Ptr<Layer> layer = LayerFactory::createLayerInstance(lp.type, lp);
+    ASSERT_TRUE(layer);
+    std::vector<Mat> inputs = {A}, outputs;
+    runLayer(layer, inputs, outputs);
+    ASSERT_EQ(outputs.size(), (size_t)1);
+
+    Mat b2d = B.reshape(1, std::vector<int>{K, 1});
+    Mat expected2d;
+    gemm(A, b2d, 1., noArray(), 0., expected2d);
+    Mat expected = expected2d.reshape(1, std::vector<int>{M});
+    normAssert(outputs[0], expected, "MatMul constant rank-1 weight packing mismatch", 1e-4, 1e-4);
 }
 
 }} // namespace

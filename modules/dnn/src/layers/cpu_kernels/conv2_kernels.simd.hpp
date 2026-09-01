@@ -4,6 +4,7 @@
 
 #include "../conv2_common.hpp"
 #include "opencv2/core/hal/intrin.hpp"
+#include "../../hal_replacement.hpp"
 
 // === dispatched calls (implemented here)
 
@@ -386,7 +387,14 @@ CV_CPU_OPTIMIZATION_NAMESPACE_BEGIN
         CONV_FINALIZE_OUT2(8, 9, CONV_ADD_NO_RESIDUAL2); \
     }
 
-#elif CV_SIMD_SCALABLE
+// This universal path assumed K0 == vlanes(), which under m1 holds only at VLEN=256,
+// so it is disabled on scalable backends as in #29180. The portable re-enable (a
+// v_setvlmax<v_float32>(K0) universal intrinsic) was implemented and measured in #29619
+// and rejected: capping vlanes() to a non-VLMAX value makes GCC emit a vsetvli per op
+// instead of one per region, which slows down every RVV vector op in the library. A
+// vector of exactly K0 lanes therefore needs native vsetvl, i.e. an accelerated backend
+// behind cv_hal_dnn_conv32f -- which RVV now provides. See #29493 / #29619.
+#elif 0  // CV_SIMD_SCALABLE: RVV goes through cv_hal_dnn_conv32f (#29493, #29619)
 
 /////////////////////////// scalable (RVV) implementation /////////////////////////////
 // K0 == vlanes(), so each of the 10 spatial positions needs exactly one vector
@@ -603,8 +611,7 @@ static void scatterScalarOut(bool aligned_k, int k_base, int k_count, int K0shif
 #define CONV_INIT_SCALAR_SUMS() \
     v_float32x4 zz = v_setzero_f32(); \
     v_float32x4 s0 = zz, s1 = zz
-#elif CV_SIMD_SCALABLE
-// RVV: K0 == vlanes(), so a single scalable vector spans the whole output block.
+#elif 0  // CV_SIMD_SCALABLE: RVV temporarily disabled for the m1 switch (#29493)
 #define CONV_INIT_SCALAR_SUMS() \
     v_float32 zz = vx_setzero_f32(); \
     v_float32 s0 = zz
@@ -642,7 +649,7 @@ static void scatterScalarOut(bool aligned_k, int k_base, int k_count, int K0shif
         s0 = v_min(s0, _vmx); s1 = v_min(s1, _vmx); \
         v_store((outbuf), s0); v_store((outbuf) + 4, s1); \
     }
-#elif CV_SIMD_SCALABLE
+#elif 0  // CV_SIMD_SCALABLE: RVV temporarily disabled for the m1 switch (#29493)
 #define CONV_FINALIZE_SCALAR_OUT(outbuf) \
     { \
         v_float32 _vsc = vx_load(scalebuf); \
@@ -2201,18 +2208,74 @@ static void conv32fC8(const void* inp__, const void* residual__, void* out__,
     int total_tasks_gen = total_blocks * nSpatChunksGen_;
 
     parallel_for_(Range(0, total_tasks_gen), [&](const Range& range) {
+        // Offer this task range to an accelerated HAL first, flattening the descriptor into a
+        // stable C argument list (no dnn types cross the boundary). The HAL fuses conv, scale,
+        // bias, residual and the fast-activation (out = min(s>=0 ? s : s*alpha, maxval)). A
+        // generic activation is a function pointer that cannot cross the ABI, so when one is
+        // present we still run the HAL for the heavy convolution and apply the (elementwise)
+        // activation over this range's output spans afterwards -- matching the built-in
+        // fast-epilogue-then-activation order below. On NOT_IMPLEMENTED fall through.
+        {
+            const int K0_ = outshape.back();
+            int sd = cs.nspatialdims;
+            int insize[3]  = { sd > 2 ? inpshape[sd-1] : 1, sd > 1 ? inpshape[sd] : 1, inpshape[sd+1] };
+            int outsize[3] = { sd > 2 ? outshape[sd-1] : 1, sd > 1 ? outshape[sd] : 1, outshape[sd+1] };
+            float maxval = FLT_MAX, default_alpha = 0.f;
+            const float* prelu_slope = nullptr;
+            switch (cs.fastActivation) {
+                case FAST_ACTIV_CLIP:       maxval = cs.activParams[1]; break;
+                case FAST_ACTIV_LEAKY_RELU: default_alpha = cs.activParams[0]; break;
+                case FAST_ACTIV_PRELU:      prelu_slope = cs.activParams.data(); break;
+                case FAST_ACTIV_NONE:       default_alpha = 1.f; break;
+                default: break; // FAST_ACTIV_RELU: maxval = FLT_MAX, default_alpha = 0
+            }
+            int hal_res = cv_hal_dnn_conv32f(
+                    (const float*)inp__, (const float*)residual__, (float*)out__,
+                    (const float*)weights__, scale__, bias__,
+                    inpshape.channels(), outshape.channels(), inpshape.back(),
+                    cs.ngroups, Kblk_, C1Max_,
+                    insize, outsize, cs.strides, cs.pads, cs.inner,
+                    cs.coordtab.data(), cs.ofstab.data(), (int)cs.ofstab.size(),
+                    maxval, default_alpha, prelu_slope,
+                    nSpatChunksGen_, range.start, range.end);
+            if (hal_res == CV_HAL_ERROR_OK) {
+                if (cs.activation) {
+                    // The HAL wrote conv + scale/bias/residual with an identity fast-epilogue
+                    // (a generic activation always comes with FAST_ACTIV_NONE); apply it in
+                    // place over the output span of every task in this range. The HAL only
+                    // accepts K0-aligned blocks, so each span is contiguous.
+                    const int K = outshape.channels();
+                    const int K1 = (K + K0_ - 1)/K0_;
+                    const int Kg = K/cs.ngroups;
+                    const float* activParams = cs.activParams.data();
+                    for (int t = range.start; t < range.end; t++) {
+                        int block_id = t/nSpatChunksGen_, chunk_id = t - block_id*nSpatChunksGen_;
+                        int p0 = chunk_id*planeblocks_/nSpatChunksGen_;
+                        int p1 = (chunk_id + 1)*planeblocks_/nSpatChunksGen_;
+                        int n = block_id/(cs.ngroups*Kblk_);
+                        int rem = block_id - n*(cs.ngroups*Kblk_);
+                        int g = rem/Kblk_, kblk = rem - g*Kblk_;
+                        int k_base = g*Kg + kblk*K0_;
+                        if (k_base >= K || p1 <= p0)
+                            continue;
+                        float* obuf = (float*)out__ + (size_t)n*K1*planeblocks_*K0_ +
+                                      (size_t)k_base*planeblocks_ + (size_t)p0*K0_;
+                        cs.activation(obuf, obuf, (p1 - p0)*K0_, activParams);
+                    }
+                }
+                return;
+            }
+            else if (hal_res != CV_HAL_ERROR_NOT_IMPLEMENTED)
+                CV_Error_(cv::Error::StsInternal,
+                    ("HAL implementation dnn_conv32f ==> cv_hal_dnn_conv32f returned %d (0x%08x)", hal_res, hal_res));
+        }
+
         constexpr int SPAT_BLOCK_SIZE = 10;
-#if CV_SIMD_SCALABLE
-        // RVV: block size follows the runtime vector width (defaultC0 = vlanes(), LMUL=2).
-        const int C0 = (int)inpshape.back();
-        int C0shift = 0; while ((1 << C0shift) < C0) C0shift++;
-        const int K0 = C0, K0shift = C0shift;
-        constexpr int C0BUF = VTraits<v_float32>::max_nlanes;  // compile-time scratch bound
-#else
+        // The block size is a fixed property of the blocked layout on every platform,
+        // so C0/K0 are compile-time constants here (#29493).
         constexpr int C0shift = 3, K0shift = C0shift;
         constexpr int C0 = 1 << C0shift, K0 = C0;
         constexpr int C0BUF = K0;
-#endif
 
         CV_Assert_N(inpshape.back() == C0, outshape.back() == K0);
 
@@ -2523,10 +2586,7 @@ static void conv32fC8(const void* inp__, const void* residual__, void* out__,
                         CONV_UPDATE_BLOCK1(5);
                         CONV_UPDATE_BLOCK1(6);
                         CONV_UPDATE_BLOCK1(7);
-                    #elif CV_SIMD_SCALABLE
-                        // RVV: K0 == vlanes(); weights are contiguous over kk for a fixed c0,
-                        // so one vx_load gives the whole K0-wide weight vector. Broadcast the
-                        // input lane and accumulate into the persistent block accumulator.
+                    #elif 0  // CV_SIMD_SCALABLE: RVV temporarily disabled for the m1 switch (#29493)
                         for (int c0 = 0; c0 < C0; ++c0) {
                             v_float32 w = vx_load(wptr + c0*K0);
                             v_float32 x = vx_setall_f32(inptr[c0]);
@@ -2557,16 +2617,9 @@ static void conv32fC8(const void* inp__, const void* residual__, void* out__,
 cv::dnn::ConvFunc getConvFunc_(int depth, int C0)
 {
     ConvFunc func = nullptr;
-#if CV_SIMD_SCALABLE
-    // RVV: block size follows the runtime vector width; accept the supported pow2 widths.
-    if (depth == CV_32F && (C0 == 8 || C0 == 16 || C0 == 32 || C0 == 64)) {
-        func = conv32fC8;
-    }
-#else
     if (depth == CV_32F && C0 == 8) {
         func = conv32fC8;
     }
-#endif
     return func;
 }
 

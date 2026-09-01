@@ -7,6 +7,11 @@
 #include "../net_impl.hpp"
 #include "conv2_common.hpp"
 #include "opencv2/core/hal/intrin.hpp"
+#include "../op_cuda.hpp"
+#ifdef HAVE_CUDA
+#include "../cuda4dnn/primitives/pooling.hpp"
+#endif
+#include "../hal_replacement.hpp"
 
 namespace cv
 {
@@ -22,6 +27,20 @@ static void maxPool32f(const void* inp_, void* out_, const ConvState& cs)
     CV_Assert(cs.inpshape.dims == cs.outshape.dims);
 
     parallel_for_(Range(0, NC1), [&](const Range& r) {
+        // Offer this task range to an accelerated HAL first, flattening the descriptor into
+        // a stable C argument list (no dnn types cross the boundary). On NOT_IMPLEMENTED
+        // (the default) fall through to the built-in kernel for [r.start, r.end).
+        {
+            int sd = cs.nspatialdims;
+            int insize[3]  = { sd > 2 ? cs.inpshape[sd-1] : 1, sd > 1 ? cs.inpshape[sd] : 1, cs.inpshape[sd+1] };
+            int outsize[3] = { sd > 2 ? cs.outshape[sd-1] : 1, sd > 1 ? cs.outshape[sd] : 1, cs.outshape[sd+1] };
+            CALL_HAL(dnn_maxpool3d32f, cv_hal_dnn_maxpool3d32f,
+                     (const float*)inp_, (float*)out_, cs.inpshape.back(),
+                     insize, outsize, cs.strides, cs.pads, cs.inner,
+                     cs.coordtab.data(), cs.ofstab.data(), (int)cs.ofstab.size(),
+                     r.start, r.end);
+        }
+
         constexpr int MAX_POOL_DIMS = ConvState::MAX_CONV_DIMS;
 
         CV_Assert(cs.nspatialdims <= MAX_POOL_DIMS && MAX_POOL_DIMS == 3);
@@ -50,9 +69,12 @@ static void maxPool32f(const void* inp_, void* out_, const ConvState& cs)
         float* out = (float*)out_ + nc0*planesize;
         const float INITVAL = -FLT_MAX;
 
-    #if CV_SIMD || CV_SIMD_SCALABLE
+    #if CV_SIMD
         int nlanes = VTraits<v_float32>::vlanes();
         v_float32 s_min = vx_setall_f32(INITVAL);
+        // RVV (CV_SIMD_SCALABLE) disabled for the m1 switch: with the fixed C0=8 the
+        // block is narrower than the register at VLEN>=512, tripping this assert. Runs
+        // scalar on RVV; re-enable via v_setvlmax<v_float32>(C0) (#29493, cf #29180).
         CV_Assert(C0 == nlanes || C0 == nlanes*2 || C0 % (nlanes*4) == 0);
     #endif
 
@@ -65,13 +87,13 @@ static void maxPool32f(const void* inp_, void* out_, const ConvState& cs)
                         y0 >= inner_y0 && y0 < inner_y1 ? inner_x0 : W;
                     int yi_ = y0*SY - padY0;
 
-                #if !(CV_SIMD || CV_SIMD_SCALABLE)
+                #if !(CV_SIMD)
                     for (int c = 0; c < C0*W; c++)
                         out[c] = INITVAL;
                 #endif
 
                     for(;;) {
-                    #if CV_SIMD || CV_SIMD_SCALABLE
+                    #if CV_SIMD
                         if (nlanes == C0) {
                             for (; x0 < x1; x0++) {
                                 int xi_ = x0*SX - padX0;
@@ -136,7 +158,7 @@ static void maxPool32f(const void* inp_, void* out_, const ConvState& cs)
                             break;
                         x1 = inner_x1;
 
-                    #if CV_SIMD || CV_SIMD_SCALABLE
+                    #if CV_SIMD
                         if (nlanes == C0) {
                             for (; x0 < x1; x0++) {
                                 int xi_ = x0*SX - padX0;
@@ -205,6 +227,109 @@ static void maxPool32f(const void* inp_, void* out_, const ConvState& cs)
             }
         }
     });
+}
+
+// Scalar counterpart to maxPool32f's SIMD path, for the types it doesn't cover.
+template<typename _Tp>
+static void maxPoolScalarT(const void* inp_, void* out_, const ConvState& cs)
+{
+    int NC1 = cs.inpshape[0]*cs.inpshape[1];
+
+    CV_Assert(cs.inpshape.layout == DATA_LAYOUT_BLOCK);
+    CV_Assert(cs.outshape.layout == DATA_LAYOUT_BLOCK);
+    CV_Assert(cs.inpshape.dims == cs.outshape.dims);
+
+    parallel_for_(Range(0, NC1), [&](const Range& r) {
+        constexpr int MAX_POOL_DIMS = ConvState::MAX_CONV_DIMS;
+
+        CV_Assert(cs.nspatialdims <= MAX_POOL_DIMS && MAX_POOL_DIMS == 3);
+
+        int sdims = cs.nspatialdims;
+        int nc0 = r.start, nc1 = r.end;
+        int C0 = cs.inpshape.back();
+        int Di = sdims > 2 ? cs.inpshape[sdims - 1] : 1;
+        int Hi = sdims > 1 ? cs.inpshape[sdims] : 1;
+        int Wi = cs.inpshape[sdims + 1];
+        int D = sdims > 2 ? cs.outshape[sdims - 1] : 1;
+        int H = sdims > 1 ? cs.outshape[sdims] : 1;
+        int W = cs.outshape[sdims + 1];
+        int iplanesize = Di*Hi*Wi*C0;
+        int planesize = D*H*W*C0;
+        int SZ = cs.strides[0], SY = cs.strides[1], SX = cs.strides[2];
+        int padZ0 = cs.pads[0], padY0 = cs.pads[1], padX0 = cs.pads[2];
+        int inner_z0 = cs.inner[0], inner_z1 = cs.inner[MAX_POOL_DIMS];
+        int inner_y0 = cs.inner[1], inner_y1 = cs.inner[MAX_POOL_DIMS + 1];
+        int inner_x0 = cs.inner[2], inner_x1 = cs.inner[MAX_POOL_DIMS + 2];
+        int ksize = (int)cs.ofstab.size();
+        const int* zyxtab = cs.coordtab.data();
+        const int* ofstab = cs.ofstab.data();
+
+        const _Tp* inp = (const _Tp*)inp_ + nc0*iplanesize;
+        _Tp* out = (_Tp*)out_ + nc0*planesize;
+        const _Tp INITVAL = std::numeric_limits<_Tp>::lowest();
+
+        for (int nc = nc0; nc < nc1; nc++, inp += iplanesize) {
+            for (int z0 = 0; z0 < D; z0++) {
+                int zi_ = z0*SZ - padZ0;
+                for (int y0 = 0; y0 < H; y0++, out += W*C0) {
+                    int x0 = 0;
+                    int x1 = z0 >= inner_z0 && z0 < inner_z1 &&
+                        y0 >= inner_y0 && y0 < inner_y1 ? inner_x0 : W;
+                    int yi_ = y0*SY - padY0;
+
+                    for (int c = 0; c < C0*W; c++)
+                        out[c] = INITVAL;
+
+                    for(;;) {
+                        for (; x0 < x1; x0++) {
+                            int xi_ = x0*SX - padX0;
+                            for (int k = 0; k < ksize; k++) {
+                                int zi = zi_ + zyxtab[k*MAX_POOL_DIMS];
+                                int yi = yi_ + zyxtab[k*MAX_POOL_DIMS+1];
+                                int xi = xi_ + zyxtab[k*MAX_POOL_DIMS+2];
+                                if ((unsigned)zi >= (unsigned)Di ||
+                                    (unsigned)yi >= (unsigned)Hi ||
+                                    (unsigned)xi >= (unsigned)Wi)
+                                    continue;
+                                const _Tp* inptr = inp + ((zi*Hi + yi)*Wi + xi)*C0;
+                                for (int c = 0; c < C0; c++)
+                                    out[x0*C0 + c] = std::max(out[x0*C0 + c], inptr[c]);
+                            }
+                        }
+                        if (x0 == W)
+                            break;
+                        x1 = inner_x1;
+
+                        for (; x0 < x1; x0++) {
+                            int xi_ = x0*SX - padX0;
+                            const _Tp* inp_xi = inp + ((Hi*zi_ + yi_)*Wi + xi_)*C0;
+                            for (int k = 0; k < ksize; k++) {
+                                const _Tp* inptr = inp_xi + ofstab[k];
+                                for (int c = 0; c < C0; c++)
+                                    out[x0*C0 + c] = std::max(out[x0*C0 + c], inptr[c]);
+                            }
+                        }
+                        x1 = W;
+                    }
+                }
+            }
+        }
+    });
+}
+
+static void maxPool8s(const void* inp_, void* out_, const ConvState& cs)
+{
+    maxPoolScalarT<int8_t>(inp_, out_, cs);
+}
+
+static void maxPool8u(const void* inp_, void* out_, const ConvState& cs)
+{
+    maxPoolScalarT<uint8_t>(inp_, out_, cs);
+}
+
+static void maxPool64f(const void* inp_, void* out_, const ConvState& cs)
+{
+    maxPoolScalarT<double>(inp_, out_, cs);
 }
 
 // temporarily exclude fp16/bf16 versions,
@@ -377,10 +502,11 @@ static void maxPool16bf(const void* inp_, void* out_, const ConvState& cs)
 typedef void (*MaxPoolFunc)(const void* inp, void* out, const ConvState& cs);
 
 // 2-output (values + ONNX-style int64 indices) NCHW scalar implementation.
-static void maxPool32f_nchw_with_indices(const float* inp, float* out, int64_t* outIdx,
-                                         int N, int C, int Hi, int Wi, int H, int W,
-                                         int kH, int kW, int sH, int sW,
-                                         int padH, int padW, int dilH, int dilW)
+template<typename _Tp>
+static void maxPoolNchwWithIndices(const _Tp* inp, _Tp* out, int64_t* outIdx,
+                                   int N, int C, int Hi, int Wi, int H, int W,
+                                   int kH, int kW, int sH, int sW,
+                                   int padH, int padW, int dilH, int dilW)
 {
     int NC = N * C;
     int inHW = Hi * Wi;
@@ -388,12 +514,12 @@ static void maxPool32f_nchw_with_indices(const float* inp, float* out, int64_t* 
     parallel_for_(Range(0, NC), [&](const Range& r) {
         for (int nc = r.start; nc < r.end; nc++) {
             int c = nc % C;
-            const float* inp_nc = inp + nc * inHW;
-            float*       out_nc = out + nc * outHW;
-            int64_t*     idx_nc = outIdx + nc * outHW;
+            const _Tp* inp_nc = inp + nc * inHW;
+            _Tp*       out_nc = out + nc * outHW;
+            int64_t*   idx_nc = outIdx + nc * outHW;
             for (int yo = 0; yo < H; yo++) {
                 for (int xo = 0; xo < W; xo++) {
-                    float vmax = -FLT_MAX;
+                    _Tp vmax = std::numeric_limits<_Tp>::lowest();
                     int64_t idxmax = -1;
                     for (int ky = 0; ky < kH; ky++) {
                         int yi = yo * sH - padH + ky * dilH;
@@ -403,7 +529,7 @@ static void maxPool32f_nchw_with_indices(const float* inp, float* out, int64_t* 
                             int xi = xo * sW - padW + kx * dilW;
                             if ((unsigned)xi >= (unsigned)Wi)
                                 continue;
-                            float v = inp_nc[yi * Wi + xi];
+                            _Tp v = inp_nc[yi * Wi + xi];
                             if (v > vmax) {
                                 vmax = v;
                                 // ONNX storage_order=0: index = (c*Hi + yi)*Wi + xi
@@ -412,7 +538,7 @@ static void maxPool32f_nchw_with_indices(const float* inp, float* out, int64_t* 
                         }
                     }
                     if (idxmax < 0) {
-                        vmax = 0.f;
+                        vmax = (_Tp)0;
                         idxmax = (int64_t)(c * Hi + 0) * Wi + 0;
                     }
                     out_nc[yo * W + xo] = vmax;
@@ -426,6 +552,8 @@ static void maxPool32f_nchw_with_indices(const float* inp, float* out, int64_t* 
 class MaxPoolLayerImpl : public MaxPoolLayer
 {
 public:
+    mutable int inpType = -1;
+
     MaxPoolLayerImpl(const LayerParams& params)
     {
         setParamsFrom(params);
@@ -473,8 +601,50 @@ public:
 
     virtual bool supportBackend(int backendId) CV_OVERRIDE
     {
+#ifdef HAVE_CUDA
+        if (backendId == DNN_BACKEND_CUDA) {
+            if (inpType != CV_32F)
+                return false;
+            if (kernel_shape.size() != 2 || outputs.size() != 1)
+                return false;
+            for (int d : dilations) if (d != 1) return false;
+            return auto_pad == AUTO_PAD_NONE || auto_pad == AUTO_PAD_VALID;
+        }
+#endif
         return backendId == DNN_BACKEND_OPENCV;
     }
+
+#ifdef HAVE_CUDA
+    Ptr<BackendNode> initCUDA(void* context_,
+                              InputArrayOfArrays inputs_,
+                              InputArrayOfArrays) CV_OVERRIDE
+    {
+        auto context = reinterpret_cast<cuda4dnn::csl::CSLContext*>(context_);
+        std::vector<cuda::GpuMatND> inputs;
+        inputs_.getGpuMatNDVector(inputs);
+        MatShape inShape = inputs[0].size;
+        const int nspatial = (int)kernel_shape.size();
+
+        cuda4dnn::PoolingConfiguration config;
+        config.poolMode = cuda4dnn::PoolingConfiguration::PoolingMode::MAX;
+        config.window_size.assign(kernel_shape.begin(), kernel_shape.end());
+        for (int i = 0; i < nspatial; i++)
+            config.strides.push_back(strides.empty() ? 1 : (size_t)strides[i]);
+        config.padMode = (auto_pad == AUTO_PAD_VALID)
+            ? cuda4dnn::PoolingConfiguration::PaddingMode::VALID
+            : cuda4dnn::PoolingConfiguration::PaddingMode::MANUAL;
+        if (config.padMode == cuda4dnn::PoolingConfiguration::PaddingMode::MANUAL) {
+            for (int i = 0; i < nspatial; i++) {
+                config.pads_begin.push_back(pads.empty() ? 0 : (size_t)pads[i]);
+                config.pads_end.push_back(pads.empty() ? 0 : (size_t)pads[i + nspatial]);
+            }
+        }
+        config.roundMode = ceil_mode ? cuda4dnn::PoolingConfiguration::RoundingMode::CEIL
+                                     : cuda4dnn::PoolingConfiguration::RoundingMode::FLOOR;
+        config.input_shape.assign(inShape.begin(), inShape.end());
+        return make_cuda_node<cuda4dnn::PoolingOp>(preferableTarget, std::move(context->cudnn_handle), config);
+    }
+#endif
 
     virtual int64_t getFLOPS(const std::vector<MatShape> &inputs,
                            const std::vector<MatShape> &outputs) const CV_OVERRIDE
@@ -499,6 +669,7 @@ public:
         int ninputs = (int)inptypes.size();
         CV_Assert(ninputs == 1);
 
+        inpType = inptypes[0];
         outtypes.clear();
         outtypes.push_back(inferType(inptypes[0]));
         if (outputs.size() == 2u)
@@ -560,7 +731,8 @@ public:
         const bool wantsIndices = (noutputs == 2u);
 
         if (wantsIndices) {
-            CV_Assert(inptype == CV_32F && "MaxPool with indices currently supports CV_32F only");
+            CV_CheckType(inptype, inptype == CV_32F || inptype == CV_8S || inptype == CV_8U || inptype == CV_64F,
+                         "MaxPool with indices: unsupported data type");
             CV_Assert(inpshape.dims == 4 && "MaxPool with indices: only 4D (N,C,H,W) inputs supported");
             CV_Assert(inpshape.layout != DATA_LAYOUT_BLOCK &&
                       "MaxPool with indices does not run on a BLOCK-layout input");
@@ -621,9 +793,31 @@ public:
         const int dilW = dilations.size() > 1 ? (int)dilations[1] : dilH;
         const int padH = pads.size() > 0 ? (int)pads[0] : 0;
         const int padW = pads.size() > 1 ? (int)pads[1] : padH;
-        maxPool32f_nchw_with_indices(
-            inp.ptr<float>(), outVal.ptr<float>(), outIdx.ptr<int64_t>(),
-            N, C, Hi, Wi, H, W, kH, kW, sH, sW, padH, padW, dilH, dilW);
+
+        switch (inp.depth()) {
+            case CV_32F:
+                maxPoolNchwWithIndices<float>(
+                    inp.ptr<float>(), outVal.ptr<float>(), outIdx.ptr<int64_t>(),
+                    N, C, Hi, Wi, H, W, kH, kW, sH, sW, padH, padW, dilH, dilW);
+                break;
+            case CV_8S:
+                maxPoolNchwWithIndices<int8_t>(
+                    inp.ptr<int8_t>(), outVal.ptr<int8_t>(), outIdx.ptr<int64_t>(),
+                    N, C, Hi, Wi, H, W, kH, kW, sH, sW, padH, padW, dilH, dilW);
+                break;
+            case CV_8U:
+                maxPoolNchwWithIndices<uint8_t>(
+                    inp.ptr<uint8_t>(), outVal.ptr<uint8_t>(), outIdx.ptr<int64_t>(),
+                    N, C, Hi, Wi, H, W, kH, kW, sH, sW, padH, padW, dilH, dilW);
+                break;
+            case CV_64F:
+                maxPoolNchwWithIndices<double>(
+                    inp.ptr<double>(), outVal.ptr<double>(), outIdx.ptr<int64_t>(),
+                    N, C, Hi, Wi, H, W, kH, kW, sH, sW, padH, padW, dilH, dilW);
+                break;
+            default:
+                CV_Error(Error::BadDepth, "MaxPool with indices: unsupported data type");
+        }
     }
 
     void runOp(const Mat& inp, Mat& out, const ConvState& cs)
@@ -631,6 +825,9 @@ public:
         int inptype = inp.type();
         MaxPoolFunc func =
             inptype == CV_32F ? maxPool32f :
+            inptype == CV_8S  ? maxPool8s :
+            inptype == CV_8U  ? maxPool8u :
+            inptype == CV_64F ? maxPool64f :
             /*inptype == CV_16F ? maxPool16f :
             inptype == CV_16BF ? maxPool16bf :*/
             nullptr;

@@ -54,6 +54,7 @@
 #include "opencv2/core/bufferpool.hpp"
 
 #include <array>
+#include <functional>
 #include <type_traits>
 
 namespace cv
@@ -2784,7 +2785,31 @@ typedef Mat_<Vec2d> Mat2d;
 typedef Mat_<Vec3d> Mat3d;
 typedef Mat_<Vec4d> Mat4d;
 
-/** @todo document */
+/** @brief Matrix class whose data may reside outside host memory. \anchor UMat_Details
+
+UMat repeats the Mat interface, but the buffer is owned by a MatAllocator, and it is the
+allocator that decides where the data physically resides: in host memory, in an OpenCL
+device buffer (see cv::ocl::getOpenCLAllocator) or in CUDA device memory (see
+cv::cuda::getCudaAllocator). Headers, reference counting, ROIs and submatrices and
+n-dimensional shapes behave as they do in Mat.
+
+Passing UMat instead of Mat to a cv:: function is the basis of the Transparent API
+(T-API). The dispatch is not keyed on the allocator: a cv:: call takes its OpenCL branch
+when OpenCL is active and the arguments are UMat objects, and otherwise maps the data
+back to host memory and runs the CPU implementation. UMat has no `data` pointer and no
+element accessors, because there may be no host address to expose; host access goes
+through UMat::getMat.
+
+@note
+  A non-default allocator must be assigned to @ref cv::UMat::allocator "UMat::allocator"
+  before the data is allocated. OpenCL is the only allocator with accelerated cv::
+  implementations, and because the T-API branch tests only whether OpenCL is active, a
+  UMat backed by any other device allocator must not be passed to cv:: functions while
+  OpenCL is enabled.
+
+@sa Mat, MatAllocator, UMatUsageFlags, cv::ocl::getOpenCLAllocator,
+cv::cuda::getCudaAllocator
+*/
 class CV_EXPORTS UMat
 {
 public:
@@ -2818,6 +2843,14 @@ public:
     //! assignment operators
     UMat& operator = (const UMat& m);
 
+    /** @brief Returns a Mat header giving host access to the same data
+    @note
+      The data is mapped into host memory on the first such view and unmapped when the
+      returned Mat is destroyed. @p flags is widened to ACCESS_RW internally, so the
+      mapping is always read-write and the allocator may write back even after
+      read-only use.
+    @param flags combination of AccessFlag values
+    */
     Mat getMat(AccessFlag flags) const;
 
     //! returns a new matrix header for the specified row
@@ -2961,7 +2994,9 @@ public:
     UMat(UMat&& m);
     UMat& operator = (UMat&& m);
 
-    /*! Returns the OpenCL buffer handle on which UMat operates on.
+    /*! Returns the device buffer handle on which UMat operates on.
+        The concrete type depends on the allocator: a `cl_mem` for the OpenCL allocator,
+        a CUDA device pointer for cv::cuda::getCudaAllocator().
         The UMat instance should be kept alive during the use of the handle to prevent the buffer to be
         returned to the OpenCV buffer pool.
      */
@@ -2988,7 +3023,7 @@ public:
     //! number of columns in the matrix; -1 when the matrix has more than 2 dimensions
     int cols;
 
-    //! custom allocator
+    //! custom allocator; assign before the data is allocated, see @ref UMat_Details
     MatAllocator* allocator;
 
     //! usage flags for allocator; recommend do not set directly, instead set during construct/create/getUMat
@@ -3856,6 +3891,66 @@ protected:
     size_t idx;
 };
 
+
+/////////////////////////////////// BroadcastOp //////////////////////////////////////
+
+/** @brief Op-agnostic driver for a broadcasting element-wise traversal.
+
+BroadcastOp takes a flat list of operand Mats (it does NOT distinguish inputs from outputs), computes
+the numpy-broadcast iteration space over all of them (channels = innermost dim), partitions it into
+tasks, runs them with parallel_for_, and for each tile hands the per-operand slices to a `body`
+callback. Everything semantic - which array is the output, which kernels run, temp buffers - lives in
+`body`. For a cv::Mat the innermost axis is always contiguous, so after dimension collapse every
+operand's innermost step is in {0,1} (1 = contiguous, 0 = broadcast-scalar) - there is no gather case.
+*/
+struct BroadcastOp
+{
+    //! One operand's slice for the current tile: base pointer + steps in ELEMENTS. stepx in {0,1}
+    //! (1 = contiguous along width, 0 = broadcast-scalar); stepy = step between the `height` rows
+    //! (0 = broadcast). ptr is non-const so the body can write the operand(s) it treats as outputs.
+    struct Slice
+    {
+        void*  ptr   = nullptr;
+        size_t stepy = 0;
+        size_t stepx = 0;
+    };
+
+    //! One 2D tile handed to the body. slices[k] corresponds to arrays[k] (same order); the body reads
+    //! width/height and the per-operand slices and owns all interpretation.
+    struct Tile
+    {
+        int width  = 0;                //!< innermost tile extent (elements)
+        int height = 0;                //!< 2nd-innermost extent (1 unless a 2D tile is handed out)
+        int narrays = 0;
+        const Slice* slices = nullptr; //!< [narrays], valid for the duration of the body call
+    };
+
+    /** @brief Drive a broadcasting element-wise traversal.
+    @param arrays   pointers to the operand Mats (inputs AND outputs, undistinguished); the iteration
+                    space is the numpy-broadcast of all their shapes (channels innermost). Headers must
+                    stay alive for the call - no Mat copies are made.
+    @param narrays  number of operands.
+    @param body     invoked once per tile with that tile's per-operand slices; runs the prepared program.
+                    Per-thread scratch is just locals in the body (declared per call => thread-safe).
+    @param expandChannels  true => channels are an explicit innermost iteration dim, so the body always
+                    sees single-channel data (1<->N channel broadcast handled geometrically). false =>
+                    channels stay folded into the element (esz = full elemSize); the body handles them.
+    @param nstripes parallel_for_ work hint; 0 => derive from the shapes (assuming ~100 cycles/element).
+    */
+    CV_EXPORTS static void run(const Mat* const* arrays, int narrays,
+                               const std::function<void(const Tile&)>& body,
+                               bool expandChannels = false,
+                               double nstripes = 0.);
+};
+
+//! Free-function shorthand for BroadcastOp::run (see BroadcastOp).
+inline void broadcastOp(const Mat* const* arrays, int narrays,
+                        const std::function<void(const BroadcastOp::Tile&)>& body,
+                        bool expandChannels = false,
+                        double nstripes = 0.)
+{
+    BroadcastOp::run(arrays, narrays, body, expandChannels, nstripes);
+}
 
 
 ///////////////////////////////// Matrix Expressions /////////////////////////////////

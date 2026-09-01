@@ -48,6 +48,11 @@
 
 namespace cv {
 namespace dnn {
+
+#ifdef HAVE_CUDA
+void registerConv2CudaBackend();  // defined in layers/conv2_layer.cpp (plain cv::dnn namespace)
+#endif
+
 CV__DNN_INLINE_NS_BEGIN
 
 static Mutex* __initialization_mutex = NULL;
@@ -76,6 +81,10 @@ public:
 } // namespace
 #endif
 
+#ifdef HAVE_CUDA
+void registerCudaCommonExecs();  // op_cuda.cpp (inline namespace)
+#endif
+
 void initializeLayerFactory()
 {
     CV_TRACE_FUNCTION();
@@ -84,8 +93,15 @@ void initializeLayerFactory()
     static ProtobufShutdown protobufShutdown; CV_UNUSED(protobufShutdown);
 #endif
 
+#ifdef HAVE_CUDA
+    // New graph engine: per-op CUDA executors.
+    registerConv2CudaBackend();
+    registerCudaCommonExecs();
+#endif
+
     CV_DNN_REGISTER_LAYER_CLASS(If,             IfLayer);
     CV_DNN_REGISTER_LAYER_CLASS(Loop,           LoopLayer);
+    CV_DNN_REGISTER_LAYER_CLASS(Scan,           ScanLayer);
     CV_DNN_REGISTER_LAYER_CLASS(Concat,         ConcatLayer);
     CV_DNN_REGISTER_LAYER_CLASS(Concat2,        Concat2Layer);
     CV_DNN_REGISTER_LAYER_CLASS(ConstantOfShape, ConstantOfShapeLayer);
@@ -98,6 +114,7 @@ void initializeLayerFactory()
     CV_DNN_REGISTER_LAYER_CLASS(Interp,         InterpLayer);
     CV_DNN_REGISTER_LAYER_CLASS(Pad2,           Pad2Layer);
     CV_DNN_REGISTER_LAYER_CLASS(NonZero,        NonZeroLayer);
+    CV_DNN_REGISTER_LAYER_CLASS(ImageDecoder,   ImageDecoderLayer);
     CV_DNN_REGISTER_LAYER_CLASS(QuantizeLinear, QuantizeLinearLayer);
     CV_DNN_REGISTER_LAYER_CLASS(DynamicQuantizeLinear, DynamicQuantizeLinearLayer);
     CV_DNN_REGISTER_LAYER_CLASS(NonMaxSuppression, NonMaxSuppressionLayer);
@@ -149,6 +166,7 @@ void initializeLayerFactory()
     CV_DNN_REGISTER_LAYER_CLASS(InnerProduct,   InnerProductLayer);
     CV_DNN_REGISTER_LAYER_CLASS(Gemm,           GemmLayer);
     CV_DNN_REGISTER_LAYER_CLASS(MatMul,         MatMulLayer);
+    CV_DNN_REGISTER_LAYER_CLASS(MatMulNBits,    MatMulNBitsLayer);
     CV_DNN_REGISTER_LAYER_CLASS(Softmax,        SoftmaxLayer);
     CV_DNN_REGISTER_LAYER_CLASS(SoftMax,        SoftmaxLayer);  // For compatibility. See https://github.com/opencv/opencv/issues/16877
     CV_DNN_REGISTER_LAYER_CLASS(MVN,            MVNLayer);
@@ -200,6 +218,7 @@ void initializeLayerFactory()
     CV_DNN_REGISTER_LAYER_CLASS(BatchNorm2,     BatchNorm2Layer);
     CV_DNN_REGISTER_LAYER_CLASS(MaxUnpool,      MaxUnpoolLayer);
     CV_DNN_REGISTER_LAYER_CLASS(Dropout,        BlankLayer);
+    CV_DNN_REGISTER_LAYER_CLASS(DropoutMask,    DropoutMaskLayer);
     CV_DNN_REGISTER_LAYER_CLASS(Identity,       BlankLayer);
     CV_DNN_REGISTER_LAYER_CLASS(Silence,        BlankLayer);
     CV_DNN_REGISTER_LAYER_CLASS(Const,          ConstLayer);
@@ -216,6 +235,10 @@ void initializeLayerFactory()
     CV_DNN_REGISTER_LAYER_CLASS(Attention,      AttentionLayer);
     CV_DNN_REGISTER_LAYER_CLASS(SDPA,            SDPALayer);
     CV_DNN_REGISTER_LAYER_CLASS(AttentionOnnxAi, AttentionOnnxAiLayer);
+    CV_DNN_REGISTER_LAYER_CLASS(CausalConvWithState, CausalConvWithStateLayer);
+    CV_DNN_REGISTER_LAYER_CLASS(BitCast,         BitCastLayer);
+    CV_DNN_REGISTER_LAYER_CLASS(LinearAttention, LinearAttentionLayer);
+    CV_DNN_REGISTER_LAYER_CLASS(FlexAttention,   FlexAttentionLayer);
     CV_DNN_REGISTER_LAYER_CLASS(RotaryEmbedding, RotaryEmbeddingLayer);
     CV_DNN_REGISTER_LAYER_CLASS(GroupNormalization, GroupNormLayer);
     CV_DNN_REGISTER_LAYER_CLASS(Cast,           CastLayer);
@@ -252,6 +275,7 @@ void initializeLayerFactory()
     CV_DNN_REGISTER_LAYER_CLASS(LSTM2,          LSTM2Layer);
     CV_DNN_REGISTER_LAYER_CLASS(GRU,            GRULayer);
     CV_DNN_REGISTER_LAYER_CLASS(CumSum,         CumSumLayer);
+    CV_DNN_REGISTER_LAYER_CLASS(CumProd,        CumProdLayer);
     CV_DNN_REGISTER_LAYER_CLASS(Einsum,         EinsumLayer);
     CV_DNN_REGISTER_LAYER_CLASS(Hardmax,        HardmaxLayer);
     CV_DNN_REGISTER_LAYER_CLASS(GatherND,       GatherNDLayer);

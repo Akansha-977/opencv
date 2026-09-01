@@ -32,6 +32,10 @@ if(POLICY CMP0148)
   cmake_policy(SET CMP0148 OLD)  # CMake 3.27+: use CMake FindPythonInterp and FindPythonLib if available.
 endif()
 
+if(POLICY CMP0218)
+  cmake_policy(SET CMP0218 NEW)  # Suppress warning for CMAKE_WARN_DEPRECATED in CMake 4.4.0+
+endif()
+
 #
 # Configure OpenCV CMake hooks
 #
@@ -200,6 +204,9 @@ OCV_OPTION(WITH_CUBLAS "Include NVidia Cuda Basic Linear Algebra Subprograms (BL
 OCV_OPTION(WITH_CUDNN "Include NVIDIA CUDA Deep Neural Network (cuDNN) library support" WITH_CUDA
   VISIBLE_IF WITH_CUDA
   VERIFY HAVE_CUDNN)
+OCV_OPTION(WITH_CUDNNJIT "Include NVIDIA CUDA Deep Neural Network (cuDNN) graph API support with runtime compiled (JIT) engines, used only when WITH_CUDNN is off" OFF
+  VISIBLE_IF WITH_CUDA
+  VERIFY HAVE_CUDNNJIT OR HAVE_CUDNN)
 OCV_OPTION(WITH_NVCUVID "Include NVidia Video Decoding library support" ON
   VISIBLE_IF WITH_CUDA
   VERIFY HAVE_NVCUVID)
@@ -1906,6 +1913,11 @@ if(WITH_CUDA OR HAVE_CUDA)
  if(WITH_CUDNN OR HAVE_CUDNN)
     status("")
     status("  cuDNN:" HAVE_CUDNN THEN "YES (ver ${CUDNN_VERSION})" ELSE NO)
+endif()
+
+ if(WITH_CUDNNJIT OR HAVE_CUDNNJIT)
+    status("")
+    status("  cuDNN JIT:" HAVE_CUDNNJIT THEN "YES (ver ${CUDNN_VERSION})" ELSE NO)
 endif()
 
 if(WITH_VULKAN OR HAVE_VULKAN)
